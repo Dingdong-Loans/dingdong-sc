@@ -5,7 +5,6 @@ import {UsingTellor} from "@tellor/contracts/UsingTellor.sol";
 
 /**
  * @title TellorUser
- * @author Lagxy
  * @dev This contract serves as an example of how to integrate the Tellor oracle for price feed-like data such as spot prices. It
  * utilizes some best practices for using Tellor by implementing a dispute time buffer and a data staleness check. In addition,
  * it also seeks to mitigate back-in-time dispute attacks by caching the most recent value and timestamp.

@@ -30,8 +30,8 @@ contract InterestRateModel {
     // ==============================================
     // View Functions
     // ==============================================
-    function getBorrowRateBPS(uint256 _duration) public view returns (uint256) {
-        uint256 utilization = i_core.getUtilizationBPS();
+    function getBorrowRateBPS(address _token, uint256 _duration) public view returns (uint256) {
+        uint256 utilization = i_core.getUtilizationBPS(_token);
         uint256 borrowDurationInDays = _duration / DAY_DENOMINATOR;
 
         uint256 ratePerDay;
