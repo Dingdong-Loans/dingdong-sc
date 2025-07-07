@@ -49,7 +49,6 @@ contract LendingCore is Initializable, PausableUpgradeable, AccessControlUpgrade
         uint64 dueDate;
         bool active;
     }
-    // perhaps add amount liquidated etc
 
     // ========== ROLES ==========
     bytes32 public constant PAUSER_ROLE = keccak256("PAUSER_ROLE");
@@ -68,11 +67,11 @@ contract LendingCore is Initializable, PausableUpgradeable, AccessControlUpgrade
     PriceOracle public s_priceOracle;
 
     // ========== STORAGES ==========
-    // Loan parameter
-    mapping(address => uint16) public s_ltv;
+    // Loan parameter (not set by default)
+    mapping(address => uint16) public s_ltvBPS;
     mapping(address => uint16) public s_liquidationPenaltyBPS;
-    uint64 public s_maxBorrowDuration = 730 days; // 2 years
-    uint64 public s_gracePeriod = 1 hours;
+    uint64 public s_maxBorrowDuration;
+    uint64 public s_gracePeriod;
 
     // Loan information
     address[] public s_debtTokens;
@@ -91,15 +90,22 @@ contract LendingCore is Initializable, PausableUpgradeable, AccessControlUpgrade
         _disableInitializers();
     }
 
-    function initialize(address defaultAdmin, address pauser, address upgrader) public initializer {
+    function initialize(address defaultAdmin, address[6] calldata role) public initializer {
         __Pausable_init();
         __AccessControl_init();
         __UUPSUpgradeable_init();
 
         _grantRole(DEFAULT_ADMIN_ROLE, defaultAdmin);
-        _grantRole(PAUSER_ROLE, pauser);
-        _grantRole(UPGRADER_ROLE, upgrader);
+        _grantRole(PAUSER_ROLE, role[0]);
+        _grantRole(UPGRADER_ROLE, role[1]);
+        _grantRole(PARAMETER_MANAGER_ROLE, role[2]);
+        _grantRole(TOKEN_MANAGER_ROLE, role[3]);
+        _grantRole(LIQUIDITY_PROVIDER_ROLE, role[4]);
+        _grantRole(LIQUIDATOR_ROLE, role[5]);
     }
+
+    // ========== OVERRIDE FUNCTIONS ==========
+    function _authorizeUpgrade(address newImplementation) internal override onlyRole(UPGRADER_ROLE) {}
 
     // ========== MAIN FUNCTIONS ==========
     /**
@@ -139,7 +145,8 @@ contract LendingCore is Initializable, PausableUpgradeable, AccessControlUpgrade
         uint256 collateralValueInUsd = s_collateralManager.getTotalTokenValueInUsd(msg.sender, _collateralToken);
         uint256 collateralValueInDebtToken = _usdToTokenAmount(_borrowToken, collateralValueInUsd);
 
-        uint256 maxBorrowBeforeInterest = Math.mulDiv(collateralValueInDebtToken, s_ltv[_borrowToken], BPS_DENOMINATOR);
+        uint256 maxBorrowBeforeInterest =
+            Math.mulDiv(collateralValueInDebtToken, s_ltvBPS[_borrowToken], BPS_DENOMINATOR);
         uint256 maxBorrowAfterInterest =
             Math.mulDiv(maxBorrowBeforeInterest, BPS_DENOMINATOR, BPS_DENOMINATOR + interestRateBPS);
 
@@ -199,7 +206,7 @@ contract LendingCore is Initializable, PausableUpgradeable, AccessControlUpgrade
         require(_getHealthFactor(_user, _collateralToken) < BPS_DENOMINATOR, "Health factor is already >= 1");
 
         uint256 denominator = Math.mulDiv(
-            s_ltv[_collateralToken], (BPS_DENOMINATOR + s_liquidationPenaltyBPS[_collateralToken]), BPS_DENOMINATOR
+            s_ltvBPS[_collateralToken], (BPS_DENOMINATOR + s_liquidationPenaltyBPS[_collateralToken]), BPS_DENOMINATOR
         );
         uint256 repayAmountUsd = Math.mulDiv(userDebtUsd, BPS_DENOMINATOR, denominator);
 
@@ -251,6 +258,41 @@ contract LendingCore is Initializable, PausableUpgradeable, AccessControlUpgrade
         IERC20Metadata(_collateralToken).safeTransfer(msg.sender, _amount);
     }
 
+    // ========== PARAMETER_MANAGER_ROLE FUNCTIONS ==========
+    /**
+     * @notice set collateral token LTV
+     * @param _token the address of collateral token
+     * @param _ltvBps the LTV Ratio in Basis Points
+     */
+    function setLTV(address _token, uint16 _ltvBps) external onlyRole(PARAMETER_MANAGER_ROLE) {
+        s_ltvBPS[_token] = _ltvBps;
+    }
+
+    /**
+     * @notice set collateral token liquidation penalty
+     * @param _token the address of collateral token
+     * @param _penaltyBps the penalty amount in Basis Points
+     */
+    function setLiquidationPenalty(address _token, uint16 _penaltyBps) external onlyRole(PARAMETER_MANAGER_ROLE) {
+        s_liquidationPenaltyBPS[_token] = _penaltyBps;
+    }
+
+    /**
+     * @notice set maximum borrow duration
+     * @param _duration the duration in seconds
+     */
+    function setMaxBorrowDuration(uint64 _duration) external onlyRole(PARAMETER_MANAGER_ROLE) {
+        s_maxBorrowDuration = _duration;
+    }
+
+    /**
+     * @notice set grace period
+     * @param _period the period duration in seconds
+     */
+    function setGracePeriod(uint64 _period) external onlyRole(PARAMETER_MANAGER_ROLE) {
+        s_gracePeriod = _period;
+    }
+
     // ========== TOKEN_MANAGER_ROLE FUNCTIONS ==========
     /**
      * @notice list new debt token
@@ -290,9 +332,42 @@ contract LendingCore is Initializable, PausableUpgradeable, AccessControlUpgrade
         emit DebtTokenRemoved(_token, msg.sender);
     }
 
-    function addCollateralToken(address _token, address _priceFeed) external onlyRole(TOKEN_MANAGER_ROLE) {}
+    /**
+     * @notice list new collateral token
+     * @param _token address of collateral token to add
+     * @param _priceFeed address of collateral token pricefeed
+     */
+    function addCollateralToken(address _token, address _priceFeed) external onlyRole(TOKEN_MANAGER_ROLE) {
+        s_priceOracle.setPriceFeed(_token, _priceFeed);
+        s_collateralTokens.push(_token);
+        s_isCollateralTokenSupported[_token] = true;
 
-    function removeCollateralToken() external onlyRole(TOKEN_MANAGER_ROLE) {}
+        emit CollateralTokenAdded(msg.sender, _token);
+    }
+
+    /**
+     * @notice remove collateral token from list
+     * @param _token address of collateral token to remove
+     * @dev currently does not remove associated oracle
+     */
+    function removeCollateralToken(address _token) external onlyRole(TOKEN_MANAGER_ROLE) {
+        uint256 length = s_collateralTokens.length;
+        for (uint256 i = 0; i < length;) {
+            if (s_collateralTokens[i] == _token) {
+                s_collateralTokens[i] = s_collateralTokens[length - 1];
+                s_collateralTokens.pop();
+
+                unchecked {
+                    i++;
+                }
+
+                break;
+            }
+        }
+
+        s_isCollateralTokenSupported[_token] = false;
+        emit CollateralTokenRemoved(_token, msg.sender);
+    }
 
     // ========== PAUSER_ROLE FUNCTIONS ==========
     function pause() public onlyRole(PAUSER_ROLE) {
@@ -302,9 +377,6 @@ contract LendingCore is Initializable, PausableUpgradeable, AccessControlUpgrade
     function unpause() public onlyRole(PAUSER_ROLE) {
         _unpause();
     }
-
-    // ========== UPGRADER_ROLE FUNCTIONS ==========
-    function _authorizeUpgrade(address newImplementation) internal override onlyRole(UPGRADER_ROLE) {}
 
     // ========== INTERNAL FUNCTIONS ==========
     /**
@@ -358,10 +430,35 @@ contract LendingCore is Initializable, PausableUpgradeable, AccessControlUpgrade
         if (debtValue == 0) return type(uint256).max;
 
         // Apply LTV to collateral first
-        uint256 riskAdjustedCollateral = Math.mulDiv(collateralValue, s_ltv[_token], BPS_DENOMINATOR);
+        uint256 riskAdjustedCollateral = Math.mulDiv(collateralValue, s_ltvBPS[_token], BPS_DENOMINATOR);
 
         // Then calculate health factor
         return Math.mulDiv(riskAdjustedCollateral, BPS_DENOMINATOR, debtValue);
+    }
+
+    // ========== UPGRADER_ROLE FUNCTIONS ==========
+    /**
+     * @notice set price orcle
+     * @param _priceOracle the address of price oracle
+     */
+    function setPriceOracle(address _priceOracle) external onlyRole(UPGRADER_ROLE) {
+        s_priceOracle = PriceOracle(_priceOracle);
+    }
+
+    /**
+     * @notice set collateral manager
+     * @param _collateralManager the address of collateral manager
+     */
+    function setCollateralManager(address _collateralManager) external onlyRole(UPGRADER_ROLE) {
+        s_collateralManager = CollateralManager(_collateralManager);
+    }
+
+    /**
+     * @notice set interest rate model
+     * @param _interestRateModel the address of interest rate model
+     */
+    function setInterestRateModel(address _interestRateModel) external onlyRole(UPGRADER_ROLE) {
+        s_interestRateModel = InterestRateModel(_interestRateModel);
     }
 
     // ========== VIEW FUNCTIONS ==========

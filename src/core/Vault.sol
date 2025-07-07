@@ -5,7 +5,7 @@ import {ERC4626} from "@openzeppelin/contracts/token/ERC20/extensions/ERC4626.so
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {IERC20Metadata} from "@openzeppelin/contracts/interfaces/IERC20Metadata.sol";
 
-/// @notice currently unused
+/// @dev currently unused
 contract Vault is ERC4626 {
     constructor(IERC20Metadata _asset)
         ERC20(string(abi.encodePacked(_asset.name(), " Vault")), string(abi.encodePacked("dd", _asset.symbol())))
