@@ -21,18 +21,23 @@ contract PriceOracle is Ownable {
 
     constructor(address initialOwner) Ownable(initialOwner) {}
 
-    // ========== VIEW FUNCTIONS ==========
+    // ========== MAIN FUNCTIONS ==========
     /**
      * @notice set token price feed
      * @param _token address of the token to add the price feed to
      * @param _feed address of price feed of the token
      */
     function setPriceFeed(address _token, address _feed) external onlyOwner {
-        require(s_priceFeeds[_token] == address(0), PriceOracle__FeedAlreadyExist());
-        require(_token == address(0) || _feed == address(0), PriceOracle__InvalidAddress());
+        if (s_priceFeeds[_token] != address(0)) revert PriceOracle__FeedAlreadyExist();
+        if (_token == address(0) || _feed == address(0)) revert PriceOracle__InvalidAddress();
 
         s_priceFeeds[_token] = _feed;
         emit PriceFeedSet(_token, _feed);
+    }
+
+    // ========== VIEW FUNCTIONS ==========
+    function getPriceFeed(address _token) external view returns (address priceFeed) {
+        return s_priceFeeds[_token];
     }
 
     /**
@@ -43,10 +48,10 @@ contract PriceOracle is Ownable {
      */
     function getValue(address _token, uint256 _amount) external returns (uint256 value) {
         address feed = s_priceFeeds[_token];
-        require(feed != address(0), PriceOracle__FeedDoesNotExist());
+        if (feed == address(0)) revert PriceOracle__FeedDoesNotExist();
 
         (uint256 price,) = ITellorUser(feed).getSpotPrice();
-        require(price > 0, PriceOracle__InvalidPrice());
+        if (price <= 0) revert PriceOracle__InvalidPrice();
 
         uint8 tokenDecimals = IERC20Metadata(_token).decimals();
 
