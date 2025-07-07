@@ -7,14 +7,12 @@ import {PriceOracle} from "./PriceOracle.sol";
 
 contract CollateralManager is Ownable {
     // ========== IMMUTABLES ==========
-    address public immutable i_coreProxy;
     PriceOracle public immutable i_oracle;
 
     // ========== STORAGE ==========
     mapping(address => mapping(address => uint256)) s_collateralBalance;
 
-    constructor(address initialOwner, address _coreProxy, address _oracle) Ownable(initialOwner) {
-        i_coreProxy = _coreProxy;
+    constructor(address initialOwner, address _oracle) Ownable(initialOwner) {
         i_oracle = PriceOracle(_oracle);
     }
 

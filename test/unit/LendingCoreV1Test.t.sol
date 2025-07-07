@@ -6,22 +6,48 @@ import {LendingCore} from "../../src/core/LendingCoreV1.sol";
 import {CollateralManager} from "../../src/core/CollateralManager.sol";
 import {InterestRateModel} from "../../src/core/InterestRateModel.sol";
 import {PriceOracle} from "../../src/core/PriceOracle.sol";
+import {TellorUser} from "../../src/tellor/TellorUser.sol";
+import {TellorPlayground} from "@tellor/contracts/TellorPlayground.sol";
 import {MockERC20} from "../mocks/MockERC20.sol";
 import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
 import {IERC20Metadata} from "@openzeppelin/contracts/interfaces/IERC20Metadata.sol";
 
 contract LendingCoreV1Test is Test {
+    string constant USD = "usd";
+    string constant USDT = "usdt";
+    string constant IDRX = "idrx";
+    string constant BTC = "btc";
+    string constant ETH = "eth";
+
+    string constant queryType = "SpotPrice";
+
+    bytes constant queryDataUSDT = abi.encode(queryType, abi.encode(USDT, USD));
+    bytes constant queryDataIDRX = abi.encode(queryType, abi.encode(IDRX, USD));
+    bytes constant queryDataBTC = abi.encode(queryType, abi.encode(BTC, USD));
+    bytes constant queryDataETH = abi.encode(queryType, abi.encode(ETH, USD));
+    bytes32 constant queryIdUSDT = keccak256(queryDataUSDT);
+    bytes32 constant queryIdIDRX = keccak256(queryDataIDRX);
+    bytes32 constant queryIdBTC = keccak256(queryDataBTC);
+    bytes32 constant queryIdETH = keccak256(queryDataETH);
+
     ERC1967Proxy public proxy;
     LendingCore public lending;
+    LendingCore public castProxy;
 
     CollateralManager public collateralManager;
     InterestRateModel public interestRateModel;
     PriceOracle public priceOracle;
 
-    MockERC20 public debtToken1;
-    MockERC20 public debtToken2;
-    MockERC20 public collateralToken1;
-    MockERC20 public collateralToken2;
+    MockERC20 public tokenUSDT;
+    MockERC20 public tokenIDRX;
+    MockERC20 public tokenBTC;
+    MockERC20 public tokenETH;
+
+    TellorPlayground tellorOracle;
+    TellorUser pricefeedUSDT;
+    TellorUser pricefeedIDRX;
+    TellorUser pricefeedBTC;
+    TellorUser pricefeedETH;
 
     address public admin = makeAddr("ADMIN");
     address public pauser = makeAddr("PAUSER");
@@ -31,20 +57,69 @@ contract LendingCoreV1Test is Test {
     address public tokenManager = makeAddr("TOKEN_MANAGER");
     address public liquidator = makeAddr("LIQUIDATOR");
 
+    address public tokenHandler = makeAddr("TOKEN_HANDLER");
+    address public oracleHandler = makeAddr("ORACLE_HANDLER");
+
     address public user1 = makeAddr("USER1");
 
-    function setUp() public {
-        debtToken1 = collateralToken1 = new MockERC20("Regular ERC20", "ERC20", 18);
-        debtToken2 = collateralToken2 = new MockERC20("Modified Decimals ERC20", "MERC20", 8);
+    modifier tokenReady() {
+        vm.startPrank(tokenHandler);
+        tokenUSDT = tokenBTC = new MockERC20("Regular ERC20", "ERC20", 18);
+        tokenIDRX = tokenETH = new MockERC20("Modified Decimals ERC20", "MERC20", 8);
+        vm.stopPrank();
+        _;
+    }
 
+    modifier pricefeedReady() {
+        vm.startPrank(oracleHandler);
+        tellorOracle = new TellorPlayground();
+        pricefeedUSDT = new TellorUser(payable(address(tellorOracle)), USDT, USD);
+        pricefeedIDRX = new TellorUser(payable(address(tellorOracle)), IDRX, USD);
+        pricefeedBTC = new TellorUser(payable(address(tellorOracle)), BTC, USD);
+        pricefeedETH = new TellorUser(payable(address(tellorOracle)), ETH, USD);
+
+        /// @dev mock price value with 8 decimal
+        uint256 priceUSDT = 1e8;
+        uint256 priceIDRX = 6042;
+        uint256 priceBTC = 100000e8;
+        uint256 priceETH = 2500e8;
+
+        tellorOracle.submitValue(queryIdUSDT, abi.encode(priceUSDT), 0, queryDataUSDT);
+        tellorOracle.submitValue(queryIdIDRX, abi.encode(priceIDRX), 0, queryDataIDRX);
+        tellorOracle.submitValue(queryIdBTC, abi.encode(priceBTC), 0, queryDataBTC);
+        tellorOracle.submitValue(queryIdETH, abi.encode(priceETH), 0, queryDataETH);
+        vm.stopPrank();
+        _;
+    }
+
+    function setUp() public {
         bytes memory data = abi.encodeWithSelector(
             LendingCore.initialize.selector,
             admin,
             [pauser, upgrader, parameterManager, tokenManager, liquidityProvider, liquidator]
         );
 
+        vm.startPrank(admin);
         lending = new LendingCore();
         proxy = new ERC1967Proxy(address(lending), data);
+        castProxy = LendingCore(address(proxy));
+
+        priceOracle = new PriceOracle(admin);
+        interestRateModel = new InterestRateModel(admin);
+        collateralManager = new CollateralManager(admin, address(priceOracle));
+        vm.stopPrank();
+
+        vm.startPrank(upgrader);
+        castProxy.setCollateralManager(address(collateralManager));
+        castProxy.setInterestRateModel(address(interestRateModel));
+        castProxy.setPriceOracle(address(priceOracle));
+        vm.stopPrank();
+    }
+
+    function _fund(address _token, address _account, uint256 _value) internal {
+        vm.startPrank(tokenHandler);
+        MockERC20(_token).mint(_account, _value);
+        vm.stopPrank();
     }
 
     function test_checkInitialization() public view {
@@ -79,12 +154,8 @@ contract LendingCoreV1Test is Test {
         assertEq(LendingCore(address(proxy)).s_gracePeriod(), 0);
 
         // Check that modules are not set yet
-        assertEq(address(LendingCore(address(proxy)).s_collateralManager()), address(0));
-        assertEq(address(LendingCore(address(proxy)).s_interestRateModel()), address(0));
-        assertEq(address(LendingCore(address(proxy)).s_priceOracle()), address(0));
-
-        // Check that debt tokens and collateral tokens arrays are empty
-        // assertEq(LendingCore(address(proxy)).s_debtTokens().length, 0);
-        // assertEq(LendingCore(address(proxy)).s_collateralTokens().length, 0);
+        assertEq(address(LendingCore(address(proxy)).s_collateralManager()), address(collateralManager));
+        assertEq(address(LendingCore(address(proxy)).s_interestRateModel()), address(interestRateModel));
+        assertEq(address(LendingCore(address(proxy)).s_priceOracle()), address(priceOracle));
     }
 }

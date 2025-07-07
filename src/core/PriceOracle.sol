@@ -19,7 +19,7 @@ contract PriceOracle is Ownable {
     // ========== STORAGES ==========
     mapping(address => address) public s_priceFeeds;
 
-    constructor(address initialOwner, address _coreProxy, address _oracle) Ownable(initialOwner) {}
+    constructor(address initialOwner) Ownable(initialOwner) {}
 
     // ========== VIEW FUNCTIONS ==========
     /**
