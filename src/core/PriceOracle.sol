@@ -5,15 +5,18 @@ import {ITellorUser} from "../tellor/ITellorUser.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {IERC20Metadata} from "@openzeppelin/contracts/interfaces/IERC20Metadata.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
+import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
-contract PriceOracle is Ownable {
+contract PriceOracle is Ownable, ReentrancyGuard {
     // ========== EVENTS ==========
     event PriceFeedSet(address indexed token, address feed);
+    event PriceFeedRemoved(address indexed token);
 
     // ========== ERRORS ==========
     error PriceOracle__InvalidAddress();
     error PriceOracle__FeedAlreadyExist();
     error PriceOracle__FeedDoesNotExist();
+    error PriceOracle__InvalidFeedContract();
     error PriceOracle__InvalidPrice();
 
     // ========== STORAGES ==========
@@ -35,6 +38,14 @@ contract PriceOracle is Ownable {
         emit PriceFeedSet(_token, _feed);
     }
 
+    function removePriceFeed(address _token) external onlyOwner {
+        if (s_priceFeeds[_token] == address(0)) revert PriceOracle__FeedDoesNotExist();
+        if (_token == address(0)) revert PriceOracle__InvalidAddress();
+
+        s_priceFeeds[_token] = address(0);
+        emit PriceFeedRemoved(_token);
+    }
+
     // ========== VIEW FUNCTIONS ==========
     function getPriceFeed(address _token) external view returns (address priceFeed) {
         return s_priceFeeds[_token];
@@ -46,12 +57,12 @@ contract PriceOracle is Ownable {
      * @param _amount the amount of token to be calculated for total value
      * @return value the value of the token calculated with amount in 1e18 format (18 decimals)
      */
-    function getValue(address _token, uint256 _amount) external returns (uint256 value) {
+    function getValue(address _token, uint256 _amount) external nonReentrant returns (uint256 value) {
         address feed = s_priceFeeds[_token];
         if (feed == address(0)) revert PriceOracle__FeedDoesNotExist();
 
         (uint256 price,) = ITellorUser(feed).getSpotPrice();
-        if (price <= 0) revert PriceOracle__InvalidPrice();
+        if (price == 0) revert PriceOracle__InvalidPrice();
 
         uint8 tokenDecimals = IERC20Metadata(_token).decimals();
 

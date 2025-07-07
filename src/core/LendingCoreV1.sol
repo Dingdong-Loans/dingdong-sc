@@ -14,7 +14,13 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
-contract LendingCore is Initializable, PausableUpgradeable, AccessControlUpgradeable, UUPSUpgradeable {
+contract LendingCore is
+    Initializable,
+    PausableUpgradeable,
+    AccessControlUpgradeable,
+    UUPSUpgradeable,
+    ReentrancyGuard
+{
     using SafeERC20 for IERC20Metadata;
 
     // ========== EVENTS ==========
@@ -113,7 +119,7 @@ contract LendingCore is Initializable, PausableUpgradeable, AccessControlUpgrade
      * @param _token address of token to deposit
      * @param _amount amount to deposit
      */
-    function depositCollateral(address _token, uint256 _amount) external {
+    function depositCollateral(address _token, uint256 _amount) external nonReentrant {
         IERC20Metadata(_token).safeTransferFrom(msg.sender, address(this), _amount);
         s_collateralManager.deposit(msg.sender, _token, _amount);
 
@@ -125,7 +131,7 @@ contract LendingCore is Initializable, PausableUpgradeable, AccessControlUpgrade
      * @param _token address of token to withdraw
      * @param _amount amount to withdraw
      */
-    function withdrawCollateral(address _token, uint256 _amount) external {
+    function withdrawCollateral(address _token, uint256 _amount) external nonReentrant {
         IERC20Metadata(_token).safeTransfer(msg.sender, _amount);
         s_collateralManager.withdraw(msg.sender, _token, _amount);
 
@@ -139,7 +145,10 @@ contract LendingCore is Initializable, PausableUpgradeable, AccessControlUpgrade
      * @param _collateralToken the address of collateral token
      * @param _duration the borrow duration
      */
-    function borrow(address _borrowToken, uint256 _amount, address _collateralToken, uint64 _duration) external {
+    function borrow(address _borrowToken, uint256 _amount, address _collateralToken, uint64 _duration)
+        external
+        nonReentrant
+    {
         uint256 interestRateBPS = s_interestRateModel.getBorrowRateBPS(_borrowToken, _duration);
 
         uint256 collateralValueInUsd = s_collateralManager.getTotalTokenValueInUsd(msg.sender, _collateralToken);
@@ -171,7 +180,7 @@ contract LendingCore is Initializable, PausableUpgradeable, AccessControlUpgrade
      * @param _collateralToken address of collateral token used as collateral on a loan
      * @param _amount amount to be repayed
      */
-    function repay(address _collateralToken, uint256 _amount) external {
+    function repay(address _collateralToken, uint256 _amount) external nonReentrant {
         /// @dev do not put checks for isCollateralToken supported in case the token is remove but some users still have debt
         // if (_collateralToken == address(0)) revert Dingdong__InvalidAddress();
 
@@ -198,7 +207,7 @@ contract LendingCore is Initializable, PausableUpgradeable, AccessControlUpgrade
      * @param _user the address of user to liquidate
      * @param _collateralToken the address of collateral token to liquidate
      */
-    function liquidate(address _user, address _collateralToken) external onlyRole(LIQUIDATOR_ROLE) {
+    function liquidate(address _user, address _collateralToken) external onlyRole(LIQUIDATOR_ROLE) nonReentrant {
         Loan memory userLoan = s_userLoans[_user][_collateralToken];
         address borrowToken = userLoan.borrowToken;
         uint256 userDebtUsd = s_priceOracle.getValue(borrowToken, userLoan.borrowAmount - userLoan.repaidAmount);
@@ -236,7 +245,7 @@ contract LendingCore is Initializable, PausableUpgradeable, AccessControlUpgrade
      * @param _token address of debt token
      * @param _amount amount of liquidity to add
      */
-    function addLiquidity(address _token, uint256 _amount) external onlyRole(LIQUIDITY_PROVIDER_ROLE) {
+    function addLiquidity(address _token, uint256 _amount) external onlyRole(LIQUIDITY_PROVIDER_ROLE) nonReentrant {
         IERC20Metadata(_token).safeTransferFrom(msg.sender, address(this), _amount);
         emit SupplyAdded(_token, msg.sender, _amount);
     }
@@ -246,7 +255,7 @@ contract LendingCore is Initializable, PausableUpgradeable, AccessControlUpgrade
      * @param _token address of debt token
      * @param _amount amount of liquidity to remove
      */
-    function removeLiquidity(address _token, uint256 _amount) external onlyRole(LIQUIDITY_PROVIDER_ROLE) {
+    function removeLiquidity(address _token, uint256 _amount) external onlyRole(LIQUIDITY_PROVIDER_ROLE) nonReentrant {
         IERC20Metadata(_token).safeTransfer(msg.sender, _amount);
         emit SupplyRemoved(_token, msg.sender, _amount);
     }
@@ -299,7 +308,7 @@ contract LendingCore is Initializable, PausableUpgradeable, AccessControlUpgrade
      * @param _token address of debt token to add
      * @param _priceFeed address of debt token pricefeed
      */
-    function addDebtToken(address _token, address _priceFeed) external onlyRole(TOKEN_MANAGER_ROLE) {
+    function addDebtToken(address _token, address _priceFeed) external onlyRole(TOKEN_MANAGER_ROLE) nonReentrant {
         s_priceOracle.setPriceFeed(_token, _priceFeed); // use try
         s_debtTokens.push(_token);
         s_debtTokenDecimals[_token] = IERC20Metadata(_token).decimals();
@@ -313,7 +322,7 @@ contract LendingCore is Initializable, PausableUpgradeable, AccessControlUpgrade
      * @param _token address of debt token to remove
      * @dev currently does not remove associated oracle
      */
-    function removeDebtToken(address _token) external onlyRole(TOKEN_MANAGER_ROLE) {
+    function removeDebtToken(address _token) external onlyRole(TOKEN_MANAGER_ROLE) nonReentrant {
         uint256 length = s_debtTokens.length;
         for (uint256 i = 0; i < length;) {
             if (s_debtTokens[i] == _token) {
@@ -337,7 +346,11 @@ contract LendingCore is Initializable, PausableUpgradeable, AccessControlUpgrade
      * @param _token address of collateral token to add
      * @param _priceFeed address of collateral token pricefeed
      */
-    function addCollateralToken(address _token, address _priceFeed) external onlyRole(TOKEN_MANAGER_ROLE) {
+    function addCollateralToken(address _token, address _priceFeed)
+        external
+        onlyRole(TOKEN_MANAGER_ROLE)
+        nonReentrant
+    {
         s_priceOracle.setPriceFeed(_token, _priceFeed);
         s_collateralTokens.push(_token);
         s_isCollateralTokenSupported[_token] = true;
@@ -350,7 +363,7 @@ contract LendingCore is Initializable, PausableUpgradeable, AccessControlUpgrade
      * @param _token address of collateral token to remove
      * @dev currently does not remove associated oracle
      */
-    function removeCollateralToken(address _token) external onlyRole(TOKEN_MANAGER_ROLE) {
+    function removeCollateralToken(address _token) external onlyRole(TOKEN_MANAGER_ROLE) nonReentrant {
         uint256 length = s_collateralTokens.length;
         for (uint256 i = 0; i < length;) {
             if (s_collateralTokens[i] == _token) {
@@ -376,6 +389,31 @@ contract LendingCore is Initializable, PausableUpgradeable, AccessControlUpgrade
 
     function unpause() public onlyRole(PAUSER_ROLE) {
         _unpause();
+    }
+
+    // ========== UPGRADER_ROLE FUNCTIONS ==========
+    /**
+     * @notice set price orcle
+     * @param _priceOracle the address of price oracle
+     */
+    function setPriceOracle(address _priceOracle) external onlyRole(UPGRADER_ROLE) {
+        s_priceOracle = PriceOracle(_priceOracle);
+    }
+
+    /**
+     * @notice set collateral manager
+     * @param _collateralManager the address of collateral manager
+     */
+    function setCollateralManager(address _collateralManager) external onlyRole(UPGRADER_ROLE) {
+        s_collateralManager = CollateralManager(_collateralManager);
+    }
+
+    /**
+     * @notice set interest rate model
+     * @param _interestRateModel the address of interest rate model
+     */
+    function setInterestRateModel(address _interestRateModel) external onlyRole(UPGRADER_ROLE) {
+        s_interestRateModel = InterestRateModel(_interestRateModel);
     }
 
     // ========== INTERNAL FUNCTIONS ==========
@@ -434,31 +472,6 @@ contract LendingCore is Initializable, PausableUpgradeable, AccessControlUpgrade
 
         // Then calculate health factor
         return Math.mulDiv(riskAdjustedCollateral, BPS_DENOMINATOR, debtValue);
-    }
-
-    // ========== UPGRADER_ROLE FUNCTIONS ==========
-    /**
-     * @notice set price orcle
-     * @param _priceOracle the address of price oracle
-     */
-    function setPriceOracle(address _priceOracle) external onlyRole(UPGRADER_ROLE) {
-        s_priceOracle = PriceOracle(_priceOracle);
-    }
-
-    /**
-     * @notice set collateral manager
-     * @param _collateralManager the address of collateral manager
-     */
-    function setCollateralManager(address _collateralManager) external onlyRole(UPGRADER_ROLE) {
-        s_collateralManager = CollateralManager(_collateralManager);
-    }
-
-    /**
-     * @notice set interest rate model
-     * @param _interestRateModel the address of interest rate model
-     */
-    function setInterestRateModel(address _interestRateModel) external onlyRole(UPGRADER_ROLE) {
-        s_interestRateModel = InterestRateModel(_interestRateModel);
     }
 
     // ========== VIEW FUNCTIONS ==========

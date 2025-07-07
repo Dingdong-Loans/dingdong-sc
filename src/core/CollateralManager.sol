@@ -4,8 +4,9 @@ pragma solidity ^0.8.27;
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {LendingCore} from "./LendingCoreV1.sol";
 import {PriceOracle} from "./PriceOracle.sol";
+import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
-contract CollateralManager is Ownable {
+contract CollateralManager is Ownable, ReentrancyGuard {
     // ========== IMMUTABLES ==========
     PriceOracle public immutable i_oracle;
 
@@ -40,7 +41,7 @@ contract CollateralManager is Ownable {
      * @param _user address of user to get the balance from
      * @param _token address of token to check the value
      */
-    function getTotalTokenValueInUsd(address _user, address _token) public returns (uint256) {
+    function getTotalTokenValueInUsd(address _user, address _token) public nonReentrant returns (uint256) {
         uint256 assetAmount = getDepositedCollateral(_user, _token);
         return i_oracle.getValue(_token, assetAmount);
     }
