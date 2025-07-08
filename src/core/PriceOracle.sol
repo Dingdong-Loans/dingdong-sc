@@ -31,6 +31,7 @@ contract PriceOracle is Ownable, ReentrancyGuard {
      * @param _feed address of price feed of the token
      */
     function setPriceFeed(address _token, address _feed) external onlyOwner {
+        /// @dev may not need this check in case you want to "update" the pricefeed
         if (s_priceFeeds[_token] != address(0)) revert PriceOracle__FeedAlreadyExist();
         if (_token == address(0) || _feed == address(0)) revert PriceOracle__InvalidAddress();
 
@@ -38,6 +39,10 @@ contract PriceOracle is Ownable, ReentrancyGuard {
         emit PriceFeedSet(_token, _feed);
     }
 
+    /**
+     * @notice remove token price feed
+     * @param _token the address of the token to remove the price feed from
+     */
     function removePriceFeed(address _token) external onlyOwner {
         if (s_priceFeeds[_token] == address(0)) revert PriceOracle__FeedDoesNotExist();
         if (_token == address(0)) revert PriceOracle__InvalidAddress();
@@ -47,8 +52,13 @@ contract PriceOracle is Ownable, ReentrancyGuard {
     }
 
     // ========== VIEW FUNCTIONS ==========
+    /**
+     * @notice get price feed address of a token
+     * @param _token the address of token to get the price feed from
+     */
     function getPriceFeed(address _token) external view returns (address priceFeed) {
-        return s_priceFeeds[_token];
+        priceFeed = s_priceFeeds[_token];
+        if (priceFeed == address(0)) revert PriceOracle__FeedDoesNotExist();
     }
 
     /**

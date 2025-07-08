@@ -6,9 +6,9 @@ import {AccessControlUpgradeable} from "@openzeppelin-upgradeable/contracts/acce
 import {Initializable} from "@openzeppelin-upgradeable/contracts/proxy/utils/Initializable.sol";
 import {PausableUpgradeable} from "@openzeppelin-upgradeable/contracts/utils/PausableUpgradeable.sol";
 import {UUPSUpgradeable} from "@openzeppelin-upgradeable/contracts/proxy/utils/UUPSUpgradeable.sol";
-import {CollateralManager} from "./CollateralManager.sol";
-import {InterestRateModel} from "./InterestRateModel.sol";
-import {PriceOracle} from "./PriceOracle.sol";
+import {ICollateralManager} from "./interfaces/ICollateralManager.sol";
+import {IInterestRateModel} from "./interfaces/IInterestRateModel.sol";
+import {IPriceOracle} from "./interfaces/IPriceOracle.sol";
 import {IERC20Metadata} from "@openzeppelin/contracts/interfaces/IERC20Metadata.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
@@ -68,9 +68,10 @@ contract LendingCore is
     uint16 public constant BPS_DENOMINATOR = 10000;
 
     // ========== MODULES ==========
-    CollateralManager public s_collateralManager;
-    InterestRateModel public s_interestRateModel;
-    PriceOracle public s_priceOracle;
+    /// @dev collateralManager contain user balance state, therefore should be immutable
+    ICollateralManager public s_collateralManager;
+    IInterestRateModel public s_interestRateModel;
+    IPriceOracle public s_priceOracle;
 
     // ========== STORAGES ==========
     // Loan parameter (not set by default)
@@ -81,10 +82,8 @@ contract LendingCore is
 
     // Loan information
     address[] public s_debtTokens;
-    address[] public s_collateralTokens;
     mapping(address => uint8) s_debtTokenDecimals;
     mapping(address => bool) s_isDebtTokenSupported;
-    mapping(address => bool) s_isCollateralTokenSupported;
     mapping(address => uint256) public s_totalBorrow;
     mapping(address => mapping(address => Loan)) public s_userLoans;
     mapping(address => uint256) s_liquidatedFunds;
@@ -119,7 +118,7 @@ contract LendingCore is
      * @param _token address of token to deposit
      * @param _amount amount to deposit
      */
-    function depositCollateral(address _token, uint256 _amount) external nonReentrant {
+    function depositCollateral(address _token, uint256 _amount) external nonReentrant whenNotPaused {
         IERC20Metadata(_token).safeTransferFrom(msg.sender, address(this), _amount);
         s_collateralManager.deposit(msg.sender, _token, _amount);
 
@@ -131,7 +130,7 @@ contract LendingCore is
      * @param _token address of token to withdraw
      * @param _amount amount to withdraw
      */
-    function withdrawCollateral(address _token, uint256 _amount) external nonReentrant {
+    function withdrawCollateral(address _token, uint256 _amount) external nonReentrant whenNotPaused {
         IERC20Metadata(_token).safeTransfer(msg.sender, _amount);
         s_collateralManager.withdraw(msg.sender, _token, _amount);
 
@@ -148,10 +147,11 @@ contract LendingCore is
     function borrow(address _borrowToken, uint256 _amount, address _collateralToken, uint64 _duration)
         external
         nonReentrant
+        whenNotPaused
     {
-        uint256 interestRateBPS = s_interestRateModel.getBorrowRateBPS(_borrowToken, _duration);
+        uint256 interestRateBPS = s_interestRateModel.getBorrowRateBPS(_duration, getUtilizationBPS(_borrowToken));
 
-        uint256 collateralValueInUsd = s_collateralManager.getTotalTokenValueInUsd(msg.sender, _collateralToken);
+        uint256 collateralValueInUsd = _getTotalTokenValueInUsd(msg.sender, _collateralToken);
         uint256 collateralValueInDebtToken = _usdToTokenAmount(_borrowToken, collateralValueInUsd);
 
         uint256 maxBorrowBeforeInterest =
@@ -180,7 +180,7 @@ contract LendingCore is
      * @param _collateralToken address of collateral token used as collateral on a loan
      * @param _amount amount to be repayed
      */
-    function repay(address _collateralToken, uint256 _amount) external nonReentrant {
+    function repay(address _collateralToken, uint256 _amount) external nonReentrant whenNotPaused {
         /// @dev do not put checks for isCollateralToken supported in case the token is remove but some users still have debt
         // if (_collateralToken == address(0)) revert Dingdong__InvalidAddress();
 
@@ -309,7 +309,8 @@ contract LendingCore is
      * @param _priceFeed address of debt token pricefeed
      */
     function addDebtToken(address _token, address _priceFeed) external onlyRole(TOKEN_MANAGER_ROLE) nonReentrant {
-        s_priceOracle.setPriceFeed(_token, _priceFeed); // use try
+        s_priceOracle.setPriceFeed(_token, _priceFeed);
+        /// @dev use try catch
         s_debtTokens.push(_token);
         s_debtTokenDecimals[_token] = IERC20Metadata(_token).decimals();
         s_isDebtTokenSupported[_token] = true;
@@ -351,9 +352,8 @@ contract LendingCore is
         onlyRole(TOKEN_MANAGER_ROLE)
         nonReentrant
     {
+        s_collateralManager.addCollateralToken(_token);
         s_priceOracle.setPriceFeed(_token, _priceFeed);
-        s_collateralTokens.push(_token);
-        s_isCollateralTokenSupported[_token] = true;
 
         emit CollateralTokenAdded(msg.sender, _token);
     }
@@ -364,21 +364,7 @@ contract LendingCore is
      * @dev currently does not remove associated oracle
      */
     function removeCollateralToken(address _token) external onlyRole(TOKEN_MANAGER_ROLE) nonReentrant {
-        uint256 length = s_collateralTokens.length;
-        for (uint256 i = 0; i < length;) {
-            if (s_collateralTokens[i] == _token) {
-                s_collateralTokens[i] = s_collateralTokens[length - 1];
-                s_collateralTokens.pop();
-
-                unchecked {
-                    i++;
-                }
-
-                break;
-            }
-        }
-
-        s_isCollateralTokenSupported[_token] = false;
+        s_collateralManager.removeCollateralToken(_token);
         emit CollateralTokenRemoved(_token, msg.sender);
     }
 
@@ -393,19 +379,20 @@ contract LendingCore is
 
     // ========== UPGRADER_ROLE FUNCTIONS ==========
     /**
+     * @notice set collateral manager (once)
+     * @param _collateralManager the address of collateral manager
+     * @dev CollateralManager intent to be assign only once, since it stores user
+     */
+    function setCollateralManager(address _collateralManager) external onlyRole(UPGRADER_ROLE) {
+        s_collateralManager = ICollateralManager(_collateralManager);
+    }
+
+    /**
      * @notice set price orcle
      * @param _priceOracle the address of price oracle
      */
     function setPriceOracle(address _priceOracle) external onlyRole(UPGRADER_ROLE) {
-        s_priceOracle = PriceOracle(_priceOracle);
-    }
-
-    /**
-     * @notice set collateral manager
-     * @param _collateralManager the address of collateral manager
-     */
-    function setCollateralManager(address _collateralManager) external onlyRole(UPGRADER_ROLE) {
-        s_collateralManager = CollateralManager(_collateralManager);
+        s_priceOracle = IPriceOracle(_priceOracle);
     }
 
     /**
@@ -413,10 +400,20 @@ contract LendingCore is
      * @param _interestRateModel the address of interest rate model
      */
     function setInterestRateModel(address _interestRateModel) external onlyRole(UPGRADER_ROLE) {
-        s_interestRateModel = InterestRateModel(_interestRateModel);
+        s_interestRateModel = IInterestRateModel(_interestRateModel);
     }
 
     // ========== INTERNAL FUNCTIONS ==========
+    /**
+     * @notice get user token value in usd
+     * @param _user address of user to get the balance from
+     * @param _token address of token to check the value
+     */
+    function _getTotalTokenValueInUsd(address _user, address _token) internal returns (uint256) {
+        uint256 assetAmount = s_collateralManager.getDepositedCollateral(_user, _token);
+        return s_priceOracle.getValue(_token, assetAmount);
+    }
+
     /**
      * @notice calculate total token that can be acquired with _amountUsd
      * @param _token the address of token to convert the _amountUsd to
@@ -461,7 +458,7 @@ contract LendingCore is
     }
 
     function _getHealthFactor(address _user, address _token) internal returns (uint256) {
-        uint256 collateralValue = s_collateralManager.getTotalTokenValueInUsd(_user, _token);
+        uint256 collateralValue = _getTotalTokenValueInUsd(_user, _token);
         Loan memory loan = s_userLoans[_user][_token];
         uint256 debtValue = loan.borrowAmount - loan.repaidAmount;
 
@@ -483,7 +480,7 @@ contract LendingCore is
         return s_totalBorrow[_token] + IERC20Metadata(_token).balanceOf(address(this));
     }
 
-    function getUtilizationBPS(address _token) external view returns (uint256) {
+    function getUtilizationBPS(address _token) public view returns (uint256) {
         uint256 totalBorrow = s_totalBorrow[_token];
         uint256 totalSupply = totalBorrow + IERC20Metadata(_token).balanceOf(address(this));
 

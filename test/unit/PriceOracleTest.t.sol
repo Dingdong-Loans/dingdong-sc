@@ -10,6 +10,7 @@ import {TellorUser} from "../../src/tellor/TellorUser.sol";
 contract PriceOracleTest is Test {
     // event redeclaration
     event PriceFeedSet(address indexed token, address feed);
+    event PriceFeedRemoved(address indexed token);
 
     string constant USD = "usd";
     string constant BTC = "btc";
@@ -69,6 +70,22 @@ contract PriceOracleTest is Test {
         vm.startPrank(user);
         vm.expectRevert();
         priceOracle.setPriceFeed(address(tokenBTC), address(pricefeedBTC));
+        vm.stopPrank();
+    }
+
+    // ========== removePriceFeed Test ==========
+    function test_removePriceFeed() public {
+        vm.startPrank(admin);
+        // set the price feed first
+        priceOracle.setPriceFeed(address(tokenBTC), address(pricefeedBTC));
+
+        // remove price feed
+        vm.expectEmit(true, false, false, false);
+        emit PriceFeedRemoved(address(tokenBTC));
+        priceOracle.removePriceFeed(address(tokenBTC));
+
+        vm.expectRevert(PriceOracle.PriceOracle__FeedDoesNotExist.selector);
+        priceOracle.getPriceFeed(address(tokenBTC));
         vm.stopPrank();
     }
 

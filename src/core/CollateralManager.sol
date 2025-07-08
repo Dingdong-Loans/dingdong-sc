@@ -1,21 +1,30 @@
-// // SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: MIT
+// Compatible with OpenZeppelin Contracts ^5.0.0
 pragma solidity ^0.8.27;
 
-import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
-import {LendingCore} from "./LendingCoreV1.sol";
-import {PriceOracle} from "./PriceOracle.sol";
-import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import {Initializable} from "@openzeppelin-upgradeable/contracts/proxy/utils/Initializable.sol";
+import {OwnableUpgradeable} from "@openzeppelin-upgradeable/contracts/access/OwnableUpgradeable.sol";
+import {UUPSUpgradeable} from "@openzeppelin-upgradeable/contracts/proxy/utils/UUPSUpgradeable.sol";
 
-contract CollateralManager is Ownable, ReentrancyGuard {
-    // ========== IMMUTABLES ==========
-    PriceOracle public immutable i_oracle;
+contract CollateralManager is Initializable, OwnableUpgradeable, UUPSUpgradeable {
+    // ========== ERRORS ==========
 
     // ========== STORAGE ==========
+    address[] public s_collateralTokens;
+    mapping(address => bool) s_isCollateralTokenSupported;
     mapping(address => mapping(address => uint256)) s_collateralBalance;
 
-    constructor(address initialOwner, address _oracle) Ownable(initialOwner) {
-        i_oracle = PriceOracle(_oracle);
+    /// @custom:oz-upgrades-unsafe-allow constructor
+    constructor() {
+        _disableInitializers();
     }
+
+    function initialize(address initialOwner) public initializer {
+        __Ownable_init(initialOwner);
+        __UUPSUpgradeable_init();
+    }
+
+    function _authorizeUpgrade(address newImplementation) internal override onlyOwner {}
 
     // ========== MAIN FUNCTIONS ==========
     function deposit(address _user, address _token, uint256 _amount) external onlyOwner {
@@ -26,6 +35,38 @@ contract CollateralManager is Ownable, ReentrancyGuard {
         s_collateralBalance[_user][_token] -= _amount;
     }
 
+    /**
+     * @notice list new collateral token
+     * @param _token address of collateral token to add
+     */
+    function addCollateralToken(address _token) external onlyOwner {
+        s_collateralTokens.push(_token);
+        s_isCollateralTokenSupported[_token] = true;
+    }
+
+    /**
+     * @notice remove collateral token from list
+     * @param _token address of collateral token to remove
+     * @dev currently does not remove associated oracle
+     */
+    function removeCollateralToken(address _token) external onlyOwner {
+        uint256 length = s_collateralTokens.length;
+        for (uint256 i = 0; i < length;) {
+            if (s_collateralTokens[i] == _token) {
+                s_collateralTokens[i] = s_collateralTokens[length - 1];
+                s_collateralTokens.pop();
+
+                unchecked {
+                    i++;
+                }
+
+                break;
+            }
+        }
+
+        s_isCollateralTokenSupported[_token] = false;
+    }
+
     // ========== VIEW FUNCTIONS ==========
     /**
      * @notice get user deposited collateral amount
@@ -34,15 +75,5 @@ contract CollateralManager is Ownable, ReentrancyGuard {
      */
     function getDepositedCollateral(address _user, address _token) public view returns (uint256) {
         return s_collateralBalance[_user][_token];
-    }
-
-    /**
-     * @notice get user token value in usd
-     * @param _user address of user to get the balance from
-     * @param _token address of token to check the value
-     */
-    function getTotalTokenValueInUsd(address _user, address _token) public nonReentrant returns (uint256) {
-        uint256 assetAmount = getDepositedCollateral(_user, _token);
-        return i_oracle.getValue(_token, assetAmount);
     }
 }

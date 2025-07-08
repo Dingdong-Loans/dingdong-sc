@@ -30,11 +30,14 @@ contract LendingCoreV1Test is Test {
     bytes32 constant queryIdBTC = keccak256(queryDataBTC);
     bytes32 constant queryIdETH = keccak256(queryDataETH);
 
-    ERC1967Proxy public proxy;
+    ERC1967Proxy public lendingProxy;
     LendingCore public lending;
-    LendingCore public castProxy;
+    LendingCore public castLendingProxy;
 
+    ERC1967Proxy public collateralManagerProxy;
     CollateralManager public collateralManager;
+    CollateralManager public castCollateralManagerProxy;
+
     InterestRateModel public interestRateModel;
     PriceOracle public priceOracle;
 
@@ -93,26 +96,37 @@ contract LendingCoreV1Test is Test {
     }
 
     function setUp() public {
-        bytes memory data = abi.encodeWithSelector(
+        vm.startPrank(admin);
+        // initialize LendingCore
+        bytes memory initializeLendingData = abi.encodeWithSelector(
             LendingCore.initialize.selector,
             admin,
             [pauser, upgrader, parameterManager, tokenManager, liquidityProvider, liquidator]
         );
-
-        vm.startPrank(admin);
         lending = new LendingCore();
-        proxy = new ERC1967Proxy(address(lending), data);
-        castProxy = LendingCore(address(proxy));
+        lendingProxy = new ERC1967Proxy(address(lending), initializeLendingData);
+        castLendingProxy = LendingCore(address(lendingProxy));
 
+        // initialize CollateralManager
+        bytes memory initializeCollateralManagerData =
+            abi.encodeWithSelector(CollateralManager.initialize.selector, address(lendingProxy));
+        collateralManager = new CollateralManager();
+        collateralManagerProxy = new ERC1967Proxy(address(collateralManager), initializeCollateralManagerData);
+        castCollateralManagerProxy = CollateralManager(address(collateralManagerProxy));
+
+        // initialize PriceOracle
         priceOracle = new PriceOracle(admin);
+        // initialize InterestRateModel
         interestRateModel = new InterestRateModel(admin);
-        collateralManager = new CollateralManager(admin, address(priceOracle));
         vm.stopPrank();
 
         vm.startPrank(upgrader);
-        castProxy.setCollateralManager(address(collateralManager));
-        castProxy.setInterestRateModel(address(interestRateModel));
-        castProxy.setPriceOracle(address(priceOracle));
+        // set CollateralManager in LendingCore
+        castLendingProxy.setCollateralManager(address(collateralManagerProxy));
+        // set InterestRateModel in LendingCore
+        castLendingProxy.setInterestRateModel(address(interestRateModel));
+        // set PriceOracle in LendingCore
+        castLendingProxy.setPriceOracle(address(priceOracle));
         vm.stopPrank();
     }
 
@@ -123,39 +137,51 @@ contract LendingCoreV1Test is Test {
     }
 
     function test_checkInitialization() public view {
-        // Check that the proxy points to the correct implementation
-        // assertEq(proxy.getImplementation(), address(lending));
+        // Check that the lendingProxy points to the correct implementation
+        // assertEq(lendingProxy.getImplementation(), address(lending));
 
         // Check that roles are properly assigned
-        assertTrue(LendingCore(address(proxy)).hasRole(LendingCore(address(proxy)).DEFAULT_ADMIN_ROLE(), admin));
-        assertTrue(LendingCore(address(proxy)).hasRole(LendingCore(address(proxy)).PAUSER_ROLE(), pauser));
-        assertTrue(LendingCore(address(proxy)).hasRole(LendingCore(address(proxy)).UPGRADER_ROLE(), upgrader));
         assertTrue(
-            LendingCore(address(proxy)).hasRole(LendingCore(address(proxy)).PARAMETER_MANAGER_ROLE(), parameterManager)
+            LendingCore(address(lendingProxy)).hasRole(LendingCore(address(lendingProxy)).DEFAULT_ADMIN_ROLE(), admin)
         );
-        assertTrue(LendingCore(address(proxy)).hasRole(LendingCore(address(proxy)).TOKEN_MANAGER_ROLE(), tokenManager));
+        assertTrue(LendingCore(address(lendingProxy)).hasRole(LendingCore(address(lendingProxy)).PAUSER_ROLE(), pauser));
         assertTrue(
-            LendingCore(address(proxy)).hasRole(
-                LendingCore(address(proxy)).LIQUIDITY_PROVIDER_ROLE(), liquidityProvider
+            LendingCore(address(lendingProxy)).hasRole(LendingCore(address(lendingProxy)).UPGRADER_ROLE(), upgrader)
+        );
+        assertTrue(
+            LendingCore(address(lendingProxy)).hasRole(
+                LendingCore(address(lendingProxy)).PARAMETER_MANAGER_ROLE(), parameterManager
             )
         );
-        assertTrue(LendingCore(address(proxy)).hasRole(LendingCore(address(proxy)).LIQUIDATOR_ROLE(), liquidator));
+        assertTrue(
+            LendingCore(address(lendingProxy)).hasRole(
+                LendingCore(address(lendingProxy)).TOKEN_MANAGER_ROLE(), tokenManager
+            )
+        );
+        assertTrue(
+            LendingCore(address(lendingProxy)).hasRole(
+                LendingCore(address(lendingProxy)).LIQUIDITY_PROVIDER_ROLE(), liquidityProvider
+            )
+        );
+        assertTrue(
+            LendingCore(address(lendingProxy)).hasRole(LendingCore(address(lendingProxy)).LIQUIDATOR_ROLE(), liquidator)
+        );
 
         // Check that the contract is not paused after initialization
-        assertFalse(LendingCore(address(proxy)).paused());
+        assertFalse(LendingCore(address(lendingProxy)).paused());
 
         // Check that the BPS denominator is set correctly
-        assertEq(LendingCore(address(proxy)).BPS_DENOMINATOR(), 10000);
+        assertEq(LendingCore(address(lendingProxy)).BPS_DENOMINATOR(), 10000);
 
         // Check that the max borrow duration is set to 2 years (730 days)
-        assertEq(LendingCore(address(proxy)).s_maxBorrowDuration(), 0);
+        assertEq(LendingCore(address(lendingProxy)).s_maxBorrowDuration(), 0);
 
         // Check that the grace period is set to 1 hour
-        assertEq(LendingCore(address(proxy)).s_gracePeriod(), 0);
+        assertEq(LendingCore(address(lendingProxy)).s_gracePeriod(), 0);
 
         // Check that modules are not set yet
-        assertEq(address(LendingCore(address(proxy)).s_collateralManager()), address(collateralManager));
-        assertEq(address(LendingCore(address(proxy)).s_interestRateModel()), address(interestRateModel));
-        assertEq(address(LendingCore(address(proxy)).s_priceOracle()), address(priceOracle));
+        assertEq(address(LendingCore(address(lendingProxy)).s_collateralManager()), address(collateralManagerProxy));
+        assertEq(address(LendingCore(address(lendingProxy)).s_interestRateModel()), address(interestRateModel));
+        assertEq(address(LendingCore(address(lendingProxy)).s_priceOracle()), address(priceOracle));
     }
 }
