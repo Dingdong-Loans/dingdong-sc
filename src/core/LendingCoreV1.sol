@@ -14,6 +14,9 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
+/// @dev delete this! testing only
+// import {console} from "forge-std/console.sol";
+
 contract LendingCore is
     Initializable,
     PausableUpgradeable,
@@ -82,11 +85,11 @@ contract LendingCore is
 
     // Loan information
     address[] public s_debtTokens;
-    mapping(address => uint8) s_debtTokenDecimals;
-    mapping(address => bool) s_isDebtTokenSupported;
+    mapping(address => uint8) public s_debtTokenDecimals;
+    mapping(address => bool) public s_isDebtTokenSupported;
     mapping(address => uint256) public s_totalBorrow;
-    mapping(address => mapping(address => Loan)) public s_userLoans;
-    mapping(address => uint256) s_liquidatedFunds;
+    mapping(address => mapping(address => Loan)) private s_userLoans;
+    mapping(address => uint256) public s_liquidatedFunds;
 
     uint256[50] private __gap;
 
@@ -155,7 +158,7 @@ contract LendingCore is
         uint256 collateralValueInDebtToken = _usdToTokenAmount(_borrowToken, collateralValueInUsd);
 
         uint256 maxBorrowBeforeInterest =
-            Math.mulDiv(collateralValueInDebtToken, s_ltvBPS[_borrowToken], BPS_DENOMINATOR);
+            Math.mulDiv(collateralValueInDebtToken, s_ltvBPS[_collateralToken], BPS_DENOMINATOR);
         uint256 maxBorrowAfterInterest =
             Math.mulDiv(maxBorrowBeforeInterest, BPS_DENOMINATOR, BPS_DENOMINATOR + interestRateBPS);
 
@@ -191,7 +194,8 @@ contract LendingCore is
         // if (_amount > debtAmount) revert Dingdong__AmountExceedsLimit();
 
         userLoan.repaidAmount += _amount;
-        s_totalBorrow[_collateralToken] -= _amount;
+        s_totalBorrow[userLoan.borrowToken] -= _amount;
+
         if (borrowAmount == (repaidAmount + _amount)) {
             delete s_userLoans[msg.sender][_collateralToken];
         }
@@ -487,5 +491,9 @@ contract LendingCore is
         if (totalSupply == 0) return 0;
 
         return Math.mulDiv(totalBorrow, BPS_DENOMINATOR, totalSupply);
+    }
+
+    function getUserLoan(address _user, address _token) external view returns (Loan memory) {
+        return s_userLoans[_user][_token];
     }
 }
