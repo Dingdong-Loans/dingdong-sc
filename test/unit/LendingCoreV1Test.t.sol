@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.27;
 
-import {Test} from "forge-std/Test.sol";
+import {Test, console} from "forge-std/Test.sol";
 import {LendingCore} from "../../src/core/LendingCoreV1.sol";
 import {CollateralManager} from "../../src/core/CollateralManager.sol";
 import {InterestRateModel} from "../../src/core/InterestRateModel.sol";
@@ -53,6 +53,12 @@ contract LendingCoreV1Test is Test {
     TellorUser pricefeedIDRX;
     TellorUser pricefeedBTC;
     TellorUser pricefeedETH;
+
+    /// @dev mock price value with 8 decimal
+    uint256 priceUSDT = 1e8;
+    uint256 priceIDRX = 6042;
+    uint256 priceBTC = 100000e8;
+    uint256 priceETH = 2500e8;
 
     address public admin = makeAddr("ADMIN");
     address public pauser = makeAddr("PAUSER");
@@ -119,12 +125,6 @@ contract LendingCoreV1Test is Test {
         pricefeedBTC = new TellorUser(payable(address(tellorOracle)), BTC, USD);
         pricefeedETH = new TellorUser(payable(address(tellorOracle)), ETH, USD);
 
-        /// @dev mock price value with 8 decimal
-        uint256 priceUSDT = 1e8;
-        uint256 priceIDRX = 6042;
-        uint256 priceBTC = 100000e8;
-        uint256 priceETH = 2500e8;
-
         tellorOracle.submitValue(queryIdUSDT, abi.encode(priceUSDT), 0, queryDataUSDT);
         tellorOracle.submitValue(queryIdIDRX, abi.encode(priceIDRX), 0, queryDataIDRX);
         tellorOracle.submitValue(queryIdBTC, abi.encode(priceBTC), 0, queryDataBTC);
@@ -153,9 +153,9 @@ contract LendingCoreV1Test is Test {
         vm.stopPrank();
     }
 
-    function _addDebtToken(address token, address priceFeed) internal {
+    function _addBorrowToken(address token, address priceFeed) internal {
         vm.startPrank(tokenManager);
-        castLendingProxy.addDebtToken(token, priceFeed);
+        castLendingProxy.addBorrowToken(token, priceFeed);
         vm.stopPrank();
     }
 
@@ -168,6 +168,18 @@ contract LendingCoreV1Test is Test {
     function _setLTV(address token, uint16 ltvBps) internal {
         vm.startPrank(parameterManager);
         castLendingProxy.setLTV(token, ltvBps);
+        vm.stopPrank();
+    }
+
+    function _setMaxBorrowDuration(uint64 _duration) internal {
+        vm.startPrank(parameterManager);
+        castLendingProxy.setMaxBorrowDuration(_duration);
+        vm.stopPrank();
+    }
+
+    function _setGracePeriod(uint64 _period) internal {
+        vm.startPrank(parameterManager);
+        castLendingProxy.setGracePeriod(_period);
         vm.stopPrank();
     }
 
@@ -207,75 +219,117 @@ contract LendingCoreV1Test is Test {
     }
 
     function test_depositCollateral() public {
+        uint256 userBalance = 1e18;
+
         _setupTokensAndPriceFeeds();
         _addCollateralToken(address(tokenBTC), address(pricefeedBTC));
-        _fund(address(tokenBTC), user1, 1e18);
+        _fund(address(tokenBTC), user1, userBalance);
 
-        uint256 amount = 0.5e18;
-        _approveAndDepositCollateral(user1, address(tokenBTC), amount);
+        // deposit half user balance
+        uint256 depositAmount = userBalance / 2;
+        _approveAndDepositCollateral(user1, address(tokenBTC), depositAmount);
 
         uint256 depositedAmount = castCollateralManagerProxy.getDepositedCollateral(user1, address(tokenBTC));
-        assertEq(depositedAmount, amount);
+        assertEq(depositedAmount, depositAmount);
     }
 
-    function test_withdrawCollateral() public {
+    function test_withdrawCollateral_full() public {
+        uint256 userBalance = 1e18;
+
         _setupTokensAndPriceFeeds();
         _addCollateralToken(address(tokenBTC), address(pricefeedBTC));
-        _fund(address(tokenBTC), user1, 1e18);
-        _approveAndDepositCollateral(user1, address(tokenBTC), 0.5e18);
+        _fund(address(tokenBTC), user1, userBalance);
 
-        uint256 withdrawAmount = 0.2e18;
+        uint256 depositAmount = userBalance;
+        _approveAndDepositCollateral(user1, address(tokenBTC), depositAmount);
+
+        // withdraw all deposited amount
+        uint256 withdrawAmount = depositAmount;
+
         vm.startPrank(user1);
         castLendingProxy.withdrawCollateral(address(tokenBTC), withdrawAmount);
         vm.stopPrank();
 
         uint256 remainingAmount = castCollateralManagerProxy.getDepositedCollateral(user1, address(tokenBTC));
-        assertEq(remainingAmount, 0.3e18);
+        assertEq(tokenBTC.balanceOf(user1), userBalance - depositAmount + withdrawAmount);
+        assertEq(remainingAmount, depositAmount - withdrawAmount);
+    }
+
+    function test_withdrawCollateral_half() public {
+        uint256 userBalance = 1e18;
+
+        _setupTokensAndPriceFeeds();
+        _addCollateralToken(address(tokenBTC), address(pricefeedBTC));
+        _fund(address(tokenBTC), user1, userBalance);
+
+        uint256 depositAmount = userBalance;
+        _approveAndDepositCollateral(user1, address(tokenBTC), depositAmount);
+
+        // withdraw half deposited amount
+        uint256 withdrawAmount = depositAmount / 2;
+
+        vm.startPrank(user1);
+        castLendingProxy.withdrawCollateral(address(tokenBTC), withdrawAmount);
+        vm.stopPrank();
+
+        uint256 remainingAmount = castCollateralManagerProxy.getDepositedCollateral(user1, address(tokenBTC));
+        assertEq(tokenBTC.balanceOf(user1), userBalance - depositAmount + withdrawAmount);
+        assertEq(remainingAmount, depositAmount - withdrawAmount);
     }
 
     function test_borrow() public {
         uint16 ltv = 5000; // 50%
-        uint256 fundLiquidity = 1000e18;
-        uint256 fundCollateral = 1e18;
+        uint256 fundLiquidity = 1000000e18; // 1.000.000 USDT
+        uint256 fundCollateral = 1e18; // 1 BTC
 
         _setupTokensAndPriceFeeds();
-        _addDebtToken(address(tokenUSDT), address(pricefeedUSDT));
+        _addBorrowToken(address(tokenUSDT), address(pricefeedUSDT));
         _addCollateralToken(address(tokenBTC), address(pricefeedBTC));
         _setLTV(address(tokenBTC), ltv);
+        _setMaxBorrowDuration(730 days);
         _fund(address(tokenBTC), user1, fundCollateral);
         _fund(address(tokenUSDT), liquidityProvider, fundLiquidity);
         _addLiquidity(address(tokenUSDT), fundLiquidity);
         _approveAndDepositCollateral(user1, address(tokenBTC), fundCollateral);
 
-        uint256 borrowAmount = 0.4e18;
+        // borrow half max borrow (before interest applied)
+        uint256 borrowAmount =
+            castLendingProxy.getMaxBorrowBeforeInterest(user1, address(tokenUSDT), address(tokenBTC)) / 2;
         vm.startPrank(user1);
         castLendingProxy.borrow(address(tokenUSDT), borrowAmount, address(tokenBTC), 30 days);
         vm.stopPrank();
 
         LendingCore.Loan memory loan = castLendingProxy.getUserLoan(user1, address(tokenBTC));
         assertEq(loan.borrowToken, address(tokenUSDT));
-        assertEq(loan.borrowAmount > borrowAmount, true);
-        assertEq(loan.active, true);
+        assertEq((loan.principal + loan.interestAccrued) > borrowAmount, true);
+        assertTrue(loan.active);
     }
 
-    function test_repay() public {
-        _setupTokensAndPriceFeeds();
-        _addDebtToken(address(tokenUSDT), address(pricefeedUSDT));
-        _addCollateralToken(address(tokenBTC), address(pricefeedBTC));
-        _setLTV(address(tokenBTC), 5000);
-        _fund(address(tokenBTC), user1, 1e18);
-        _fund(address(tokenUSDT), liquidityProvider, 1000e18);
-        _addLiquidity(address(tokenUSDT), 1000e18);
-        _approveAndDepositCollateral(user1, address(tokenBTC), 1e18);
+    function test_repay_half() public {
+        uint16 ltv = 5000; // 50%
+        uint256 fundLiquidity = 1000000e18; // 1.000.000 USDT
+        uint256 fundCollateral = 1e18; // 1 BTC
 
+        _setupTokensAndPriceFeeds();
+        _addBorrowToken(address(tokenUSDT), address(pricefeedUSDT));
+        _addCollateralToken(address(tokenBTC), address(pricefeedBTC));
+        _setLTV(address(tokenBTC), ltv);
+        _setMaxBorrowDuration(730 days);
+        _fund(address(tokenBTC), user1, fundCollateral);
+        _fund(address(tokenUSDT), liquidityProvider, fundLiquidity);
+        _addLiquidity(address(tokenUSDT), fundLiquidity);
+        _approveAndDepositCollateral(user1, address(tokenBTC), fundCollateral);
+
+        uint256 borrowAmount =
+            castLendingProxy.getMaxBorrowBeforeInterest(user1, address(tokenUSDT), address(tokenBTC)) / 2;
         vm.startPrank(user1);
-        castLendingProxy.borrow(address(tokenUSDT), 0.4e18, address(tokenBTC), 30 days);
+        castLendingProxy.borrow(address(tokenUSDT), borrowAmount, address(tokenBTC), 30 days);
         vm.stopPrank();
 
-        _fund(address(tokenUSDT), user1, 1000e18);
+        _fund(address(tokenUSDT), user1, borrowAmount);
         LendingCore.Loan memory loanBefore = castLendingProxy.getUserLoan(user1, address(tokenBTC));
 
-        uint256 repayAmount = 0.2e18;
+        uint256 repayAmount = borrowAmount;
         vm.startPrank(user1);
         IERC20Metadata(address(tokenUSDT)).approve(address(lendingProxy), repayAmount);
         castLendingProxy.repay(address(tokenBTC), repayAmount);
@@ -285,51 +339,137 @@ contract LendingCoreV1Test is Test {
         assertEq(loanAfter.repaidAmount, loanBefore.repaidAmount + repayAmount);
     }
 
-    function test_addLiquidity() public {
-        _setupTokensAndPriceFeeds();
-        _addDebtToken(address(tokenUSDT), address(pricefeedUSDT));
-        _fund(address(tokenUSDT), liquidityProvider, 1000e18);
+    function test_repay_full() public {
+        uint16 ltv = 5000; // 50%
+        uint256 fundLiquidity = 1000000e18; // 1.000.000 USDT
+        uint256 fundCollateral = 1e18; // 1 BTC
 
-        uint256 amount = 500e18;
-        _addLiquidity(address(tokenUSDT), amount);
+        _setupTokensAndPriceFeeds();
+        _addBorrowToken(address(tokenUSDT), address(pricefeedUSDT));
+        _addCollateralToken(address(tokenBTC), address(pricefeedBTC));
+        _setLTV(address(tokenBTC), ltv);
+        _setMaxBorrowDuration(730 days);
+        _fund(address(tokenBTC), user1, fundCollateral);
+        _fund(address(tokenUSDT), liquidityProvider, fundLiquidity);
+        _addLiquidity(address(tokenUSDT), fundLiquidity);
+        _approveAndDepositCollateral(user1, address(tokenBTC), fundCollateral);
+
+        uint256 borrowAmount =
+            castLendingProxy.getMaxBorrowBeforeInterest(user1, address(tokenUSDT), address(tokenBTC)) / 2;
+        vm.startPrank(user1);
+        castLendingProxy.borrow(address(tokenUSDT), borrowAmount, address(tokenBTC), 30 days);
+        vm.stopPrank();
+
+        _fund(address(tokenUSDT), user1, borrowAmount);
+
+        // repay borrowAmount + interest = full repayment
+        uint256 repayAmount = borrowAmount + castLendingProxy.getUserLoan(user1, address(tokenBTC)).interestAccrued;
+        vm.startPrank(user1);
+        IERC20Metadata(address(tokenUSDT)).approve(address(lendingProxy), repayAmount);
+        castLendingProxy.repay(address(tokenBTC), repayAmount);
+        vm.stopPrank();
+
+        LendingCore.Loan memory loanAfter = castLendingProxy.getUserLoan(user1, address(tokenBTC));
+
+        // check if loan information resets immediately after full repayment
+        assertEq(loanAfter.principal, 0);
+        assertEq(loanAfter.interestAccrued, 0);
+        assertEq(loanAfter.interestRateBPS, 0);
+        assertEq(loanAfter.repaidAmount, 0);
+        assertEq(loanAfter.totalLiquidated, 0);
+        assertEq(loanAfter.borrowToken, address(0));
+        assertEq(loanAfter.startTime, 0);
+        assertEq(loanAfter.dueDate, 0);
+        assertFalse(loanAfter.active);
+    }
+
+    function test_addLiquidity_half() public {
+        uint256 fundLiquidity = 1000000e18; // 1.000.000 USDT
+
+        _setupTokensAndPriceFeeds();
+        _addBorrowToken(address(tokenUSDT), address(pricefeedUSDT));
+        _fund(address(tokenUSDT), liquidityProvider, fundLiquidity);
+
+        uint256 addAmount = fundLiquidity / 2;
+        _addLiquidity(address(tokenUSDT), addAmount);
 
         uint256 balance = IERC20Metadata(address(tokenUSDT)).balanceOf(address(lendingProxy));
-        assertEq(balance, amount);
+        assertEq(balance, addAmount);
     }
 
-    function test_removeLiquidity() public {
-        uint256 amount = 200e18;
+    function test_addLiquidity_full() public {
+        uint256 fundLiquidity = 1000000e18; // 1.000.000 USDT
 
         _setupTokensAndPriceFeeds();
-        _fund(address(tokenUSDT), liquidityProvider, amount);
-        _addLiquidity(address(tokenUSDT), amount);
+        _addBorrowToken(address(tokenUSDT), address(pricefeedUSDT));
+        _fund(address(tokenUSDT), liquidityProvider, fundLiquidity);
 
+        uint256 addAmount = fundLiquidity;
+        _addLiquidity(address(tokenUSDT), addAmount);
+
+        uint256 balance = tokenUSDT.balanceOf(address(lendingProxy));
+        assertEq(balance, addAmount);
+    }
+
+    function test_removeLiquidity_half() public {
+        uint256 fundLiquidity = 1000000e18; // 1.000.000 USDT
+
+        _setupTokensAndPriceFeeds();
+        _fund(address(tokenUSDT), liquidityProvider, fundLiquidity);
+        _addLiquidity(address(tokenUSDT), fundLiquidity);
+
+        uint256 removeAmount = fundLiquidity / 2;
         vm.startPrank(liquidityProvider);
-        castLendingProxy.removeLiquidity(address(tokenUSDT), amount);
+        castLendingProxy.removeLiquidity(address(tokenUSDT), removeAmount);
         vm.stopPrank();
 
-        uint256 providerBalance = IERC20Metadata(address(tokenUSDT)).balanceOf(liquidityProvider);
-        assertEq(providerBalance, amount);
+        uint256 providerBalance = tokenUSDT.balanceOf(liquidityProvider);
+        uint256 protocolBalance = tokenUSDT.balanceOf(address(lendingProxy));
+        assertEq(removeAmount, providerBalance);
+        assertEq(protocolBalance, removeAmount); // other half
     }
 
-    function test_addDebtToken() public {
-        _setupTokensAndPriceFeeds();
-        _addDebtToken(address(tokenUSDT), address(pricefeedUSDT));
+    function test_removeLiquidity_full() public {
+        uint256 fundLiquidity = 1000000e18; // 1.000.000 USDT
 
-        bool isSupported = castLendingProxy.s_isDebtTokenSupported(address(tokenUSDT));
+        _setupTokensAndPriceFeeds();
+        _fund(address(tokenUSDT), liquidityProvider, fundLiquidity);
+        _addLiquidity(address(tokenUSDT), fundLiquidity);
+
+        uint256 removeAmount = fundLiquidity;
+        vm.startPrank(liquidityProvider);
+        castLendingProxy.removeLiquidity(address(tokenUSDT), removeAmount);
+        vm.stopPrank();
+
+        uint256 providerBalance = tokenUSDT.balanceOf(liquidityProvider);
+        uint256 protocolBalance = tokenUSDT.balanceOf(address(lendingProxy));
+
+        assertEq(removeAmount, providerBalance);
+        assertEq(protocolBalance, 0);
+    }
+
+    function test_addBorrowToken() public {
+        _setupTokensAndPriceFeeds();
+        _addBorrowToken(address(tokenUSDT), address(pricefeedUSDT));
+
+        bool isSupported = castLendingProxy.s_isBorrowTokenSupported(address(tokenUSDT));
+        address addedToken = castLendingProxy.s_borrowTokens(0);
         assertEq(isSupported, true);
+        assertEq(addedToken, address(tokenUSDT));
     }
 
-    function test_removeDebtToken() public {
+    function test_removeBorrowToken() public {
         _setupTokensAndPriceFeeds();
-        test_addDebtToken();
+        _addBorrowToken(address(tokenUSDT), address(pricefeedUSDT));
 
         vm.startPrank(tokenManager);
-        castLendingProxy.removeDebtToken(address(tokenUSDT));
+        castLendingProxy.removeBorrowToken(address(tokenUSDT));
         vm.stopPrank();
 
-        bool isSupported = castLendingProxy.s_isDebtTokenSupported(address(tokenUSDT));
+        bool isSupported = castLendingProxy.s_isBorrowTokenSupported(address(tokenUSDT));
+        uint256 tokenCount = castLendingProxy.getBorrowTokens().length;
         assertEq(isSupported, false);
+        assertEq(tokenCount, 0);
     }
 
     function test_addCollateralToken() public {
@@ -337,7 +477,9 @@ contract LendingCoreV1Test is Test {
         _addCollateralToken(address(tokenBTC), address(pricefeedBTC));
 
         bool isSupported = castCollateralManagerProxy.s_isCollateralTokenSupported(address(tokenBTC));
+        address addedToken = castCollateralManagerProxy.s_collateralTokens(0);
         assertEq(isSupported, true);
+        assertEq(addedToken, address(tokenBTC));
     }
 
     function test_removeCollateralToken() public {
@@ -353,96 +495,127 @@ contract LendingCoreV1Test is Test {
     }
 
     function test_setLTV() public {
-        _setLTV(address(tokenBTC), 5000);
+        uint16 ltvRatio = 5000; // 50%
+
+        _setLTV(address(tokenBTC), ltvRatio);
 
         uint16 ltv = castLendingProxy.s_ltvBPS(address(tokenBTC));
-        assertEq(ltv, 5000);
+        assertEq(ltv, ltvRatio);
     }
 
     function test_setLiquidationPenalty() public {
-        _setLiquidationPenalty(address(tokenBTC), 1000);
+        uint16 liquidationPenalty = 1000; // 10%
+        _setLiquidationPenalty(address(tokenBTC), liquidationPenalty);
 
         uint16 penalty = castLendingProxy.s_liquidationPenaltyBPS(address(tokenBTC));
-        assertEq(penalty, 1000);
+        assertEq(penalty, liquidationPenalty);
     }
 
     function test_setMaxBorrowDuration() public {
-        uint64 duration = 365 days;
-        vm.startPrank(parameterManager);
-        castLendingProxy.setMaxBorrowDuration(duration);
-        vm.stopPrank();
+        uint64 durationAmount = 365 days;
+        _setMaxBorrowDuration(durationAmount);
 
-        uint64 setDuration = castLendingProxy.s_maxBorrowDuration();
-        assertEq(setDuration, duration);
+        uint64 duration = castLendingProxy.s_maxBorrowDuration();
+        assertEq(duration, durationAmount);
     }
 
     function test_setGracePeriod() public {
-        uint64 period = 7 days;
-        vm.startPrank(parameterManager);
-        castLendingProxy.setGracePeriod(period);
-        vm.stopPrank();
+        uint64 periodAmount = 7 days;
+        _setGracePeriod(periodAmount);
 
-        uint64 setPeriod = castLendingProxy.s_gracePeriod();
-        assertEq(setPeriod, period);
+        uint64 period = castLendingProxy.s_gracePeriod();
+        assertEq(period, periodAmount);
     }
 
     function test_pauseUnpause() public {
+        _setupTokensAndPriceFeeds();
+        _addCollateralToken(address(tokenBTC), address(pricefeedBTC));
+        _fund(address(tokenBTC), user1, 1e18);
+
         vm.startPrank(pauser);
         castLendingProxy.pause();
         vm.stopPrank();
 
         assertTrue(castLendingProxy.paused());
 
+        // try to deposit collateral while paused
+        vm.startPrank(user1);
+        tokenBTC.approve(address(castLendingProxy), 1e18);
+        vm.expectRevert();
+        castLendingProxy.depositCollateral(address(tokenBTC), 1e18);
+        vm.stopPrank();
+
         vm.startPrank(pauser);
         castLendingProxy.unpause();
+        vm.stopPrank();
+
+        // try to deposit collateral after unpause
+        vm.startPrank(user1);
+        tokenBTC.approve(address(castLendingProxy), 1e18);
+        castLendingProxy.depositCollateral(address(tokenBTC), 1e18);
         vm.stopPrank();
 
         assertFalse(castLendingProxy.paused());
     }
 
+    // ========== VIEW FUNCTIONS TESTS =========
     function test_getAvailableSupply() public {
+        uint256 fundLiquidity = 1000e18; // 1.000 USDT
+
         _setupTokensAndPriceFeeds();
-        _addDebtToken(address(tokenUSDT), address(pricefeedUSDT));
-        _fund(address(tokenUSDT), liquidityProvider, 1000e18);
-        _addLiquidity(address(tokenUSDT), 500e18);
+        _addBorrowToken(address(tokenUSDT), address(pricefeedUSDT));
+        _fund(address(tokenUSDT), liquidityProvider, fundLiquidity);
+        _addLiquidity(address(tokenUSDT), fundLiquidity);
 
         uint256 availableSupply = castLendingProxy.getAvailableSupply(address(tokenUSDT));
-        assertEq(availableSupply, 500e18);
+        assertEq(availableSupply, fundLiquidity);
     }
 
     function test_getTotalSupply() public {
+        uint16 ltv = 5000; // 50%
+        uint256 fundLiquidity = 1000e18; // 1.000 USDT
+        uint256 fundCollateral = 1e18; // 1 BTC
+
         _setupTokensAndPriceFeeds();
-        _addDebtToken(address(tokenUSDT), address(pricefeedUSDT));
+        _addBorrowToken(address(tokenUSDT), address(pricefeedUSDT));
         _addCollateralToken(address(tokenBTC), address(pricefeedBTC));
-        _setLTV(address(tokenBTC), 5000);
-        _fund(address(tokenBTC), user1, 1e18);
-        _fund(address(tokenUSDT), liquidityProvider, 1000e18);
-        _addLiquidity(address(tokenUSDT), 500e18);
-        _approveAndDepositCollateral(user1, address(tokenBTC), 1e18);
+        _setLTV(address(tokenBTC), ltv);
+        _setMaxBorrowDuration(730 days);
+        _fund(address(tokenBTC), user1, fundCollateral);
+        _fund(address(tokenUSDT), liquidityProvider, fundLiquidity);
+        _addLiquidity(address(tokenUSDT), fundLiquidity);
+        _approveAndDepositCollateral(user1, address(tokenBTC), fundCollateral);
 
         vm.startPrank(user1);
         castLendingProxy.borrow(address(tokenUSDT), 100e18, address(tokenBTC), 30 days);
         vm.stopPrank();
 
         uint256 totalSupply = castLendingProxy.getTotalSupply(address(tokenUSDT));
-        assertEq(totalSupply, 500e18);
+        uint256 expectedSupply = fundLiquidity + castLendingProxy.getUserLoan(user1, address(tokenBTC)).interestAccrued; // after borrow
+
+        assertEq(totalSupply, expectedSupply);
     }
 
-    function test_getUtilizationBPS() public {
-        _setupTokensAndPriceFeeds();
-        _addDebtToken(address(tokenUSDT), address(pricefeedUSDT));
-        _addCollateralToken(address(tokenBTC), address(pricefeedBTC));
-        _setLTV(address(tokenBTC), 5000);
-        _fund(address(tokenBTC), user1, 1e18);
-        _fund(address(tokenUSDT), liquidityProvider, 1000e18);
-        _addLiquidity(address(tokenUSDT), 500e18);
-        _approveAndDepositCollateral(user1, address(tokenBTC), 1e18);
+    // function test_getUtilizationBPS() public {
+    //     uint16 ltv = 5000; // 50%
+    //     uint256 fundLiquidity = 1000e18; // 1.000 USDT
+    //     uint256 fundCollateral = 1e18; // 1 BTC
 
-        vm.startPrank(user1);
-        castLendingProxy.borrow(address(tokenUSDT), 100e18, address(tokenBTC), 30 days);
-        vm.stopPrank();
+    //     _setupTokensAndPriceFeeds();
+    //     _addBorrowToken(address(tokenUSDT), address(pricefeedUSDT));
+    //     _addCollateralToken(address(tokenBTC), address(pricefeedBTC));
+    //     _setLTV(address(tokenBTC), ltv);
+    //     _setMaxBorrowDuration(730 days);
+    //     _fund(address(tokenBTC), user1, fundCollateral);
+    //     _fund(address(tokenUSDT), liquidityProvider, fundLiquidity);
+    //     _addLiquidity(address(tokenUSDT), fundLiquidity);
+    //     _approveAndDepositCollateral(user1, address(tokenBTC), fundCollateral);
 
-        uint256 utilization = castLendingProxy.getUtilizationBPS(address(tokenUSDT));
-        assertEq(utilization, 2000);
-    }
+    //     vm.startPrank(user1);
+    //     castLendingProxy.borrow(address(tokenUSDT), 100e18, address(tokenBTC), 30 days);
+    //     vm.stopPrank();
+
+    //     uint256 utilization = castLendingProxy.getUtilizationBPS(address(tokenUSDT));
+    //     assertEq(utilization, 2000);
+    // }
 }

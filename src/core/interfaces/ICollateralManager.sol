@@ -4,6 +4,11 @@ pragma solidity ^0.8.27;
 /// @title ICollateralManager
 /// @notice Interface for the CollateralManager contract
 interface ICollateralManager {
+    /// @notice Check is collateral token supported
+    /// @param _token Address of the token to check
+    /// @return isSupported is collateral token supported
+    function s_isCollateralTokenSupported(address _token) external view returns (bool);
+
     /// @notice Deposits collateral for a user
     /// @param _user Address of the user
     /// @param _token Address of the token to deposit
@@ -27,6 +32,6 @@ interface ICollateralManager {
     /// @notice Gets the amount of collateral a user has deposited
     /// @param _user Address of the user
     /// @param _token Address of the token
-    /// @return amount of the specified token deposited by the user
+    /// @return amount Amount of the specified token deposited by the user
     function getDepositedCollateral(address _user, address _token) external view returns (uint256);
 }

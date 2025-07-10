@@ -7,8 +7,6 @@ import {OwnableUpgradeable} from "@openzeppelin-upgradeable/contracts/access/Own
 import {UUPSUpgradeable} from "@openzeppelin-upgradeable/contracts/proxy/utils/UUPSUpgradeable.sol";
 
 contract CollateralManager is Initializable, OwnableUpgradeable, UUPSUpgradeable {
-    // ========== ERRORS ==========
-
     // ========== STORAGE ==========
     address[] public s_collateralTokens;
     mapping(address => bool) public s_isCollateralTokenSupported;
