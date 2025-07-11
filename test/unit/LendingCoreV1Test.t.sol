@@ -171,13 +171,13 @@ contract LendingCoreV1Test is Test {
         vm.stopPrank();
     }
 
-    function _setMaxBorrowDuration(uint64 _duration) internal {
+    function _setMaxBorrowDuration(uint40 _duration) internal {
         vm.startPrank(parameterManager);
         castLendingProxy.setMaxBorrowDuration(_duration);
         vm.stopPrank();
     }
 
-    function _setGracePeriod(uint64 _period) internal {
+    function _setGracePeriod(uint40 _period) internal {
         vm.startPrank(parameterManager);
         castLendingProxy.setGracePeriod(_period);
         vm.stopPrank();
@@ -415,6 +415,7 @@ contract LendingCoreV1Test is Test {
         uint256 fundLiquidity = 1000000e18; // 1.000.000 USDT
 
         _setupTokensAndPriceFeeds();
+        _addBorrowToken(address(tokenUSDT), address(pricefeedUSDT));
         _fund(address(tokenUSDT), liquidityProvider, fundLiquidity);
         _addLiquidity(address(tokenUSDT), fundLiquidity);
 
@@ -433,6 +434,7 @@ contract LendingCoreV1Test is Test {
         uint256 fundLiquidity = 1000000e18; // 1.000.000 USDT
 
         _setupTokensAndPriceFeeds();
+        _addBorrowToken(address(tokenUSDT), address(pricefeedUSDT));
         _fund(address(tokenUSDT), liquidityProvider, fundLiquidity);
         _addLiquidity(address(tokenUSDT), fundLiquidity);
 
@@ -497,6 +499,8 @@ contract LendingCoreV1Test is Test {
     function test_setLTV() public {
         uint16 ltvRatio = 5000; // 50%
 
+        _setupTokensAndPriceFeeds();
+        _addCollateralToken(address(tokenBTC), address(pricefeedBTC));
         _setLTV(address(tokenBTC), ltvRatio);
 
         uint16 ltv = castLendingProxy.s_ltvBPS(address(tokenBTC));
@@ -512,7 +516,7 @@ contract LendingCoreV1Test is Test {
     }
 
     function test_setMaxBorrowDuration() public {
-        uint64 durationAmount = 365 days;
+        uint40 durationAmount = 365 days;
         _setMaxBorrowDuration(durationAmount);
 
         uint64 duration = castLendingProxy.s_maxBorrowDuration();
@@ -520,7 +524,7 @@ contract LendingCoreV1Test is Test {
     }
 
     function test_setGracePeriod() public {
-        uint64 periodAmount = 7 days;
+        uint40 periodAmount = 7 days;
         _setGracePeriod(periodAmount);
 
         uint64 period = castLendingProxy.s_gracePeriod();

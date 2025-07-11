@@ -41,16 +41,14 @@ contract LendingCore is
 
     // ========== ERRORS ==========
     error LendingCore__InvalidAddress();
-    error LendingCore__OverflowOrUnderflow();
-    error LendingCore__ZeroAmount();
-    error LendingCore__AmountExceedsLimit();
-    error LendingCore__DurationExceedsLimit();
-    error LendingCore__DivisionByZero();
-    error LendingCore__InsufficientLiquidity();
-    error LendingCore__InsufficientBalance();
+    error LendingCore__MathOverflow();
+    error LendingCore__ZeroAmountNotAllowed();
+    error LendingCore__AmountExceedsLimit(uint256 max, uint256 attempted);
+    error LendingCore__DurationExceedsLimit(uint256 max, uint256 attemted);
+    error LendingCore__InsufficientBalance(address token, uint256 available);
     error LendingCore__LoanIsActive();
     error LendingCore__LoanIsInactive();
-    error LendingCore__TokenNotSupported();
+    error LendingCore__UnsupportedToken(address token);
     error LendingCore__NotLiquidateable();
 
     // ========== TYPE DECLARATIONS ==========
@@ -85,18 +83,21 @@ contract LendingCore is
 
     // ========== STORAGES ==========
     // Loan parameter (not set by default)
-    uint64 public s_maxBorrowDuration;
-    uint64 public s_gracePeriod;
+    uint40 public s_maxBorrowDuration;
+    uint40 public s_gracePeriod;
     mapping(address => uint16) public s_ltvBPS;
     mapping(address => uint16) public s_liquidationPenaltyBPS;
 
-    // Loan information
+    // Protocol information
     address[] public s_borrowTokens;
     mapping(address => uint8) public s_borrowTokenDecimals;
     mapping(address => bool) public s_isBorrowTokenSupported;
     mapping(address => uint256) public s_totalDebt;
     mapping(address => mapping(address => Loan)) private s_userLoans;
-    mapping(address => uint256) public s_liquidatedFunds;
+    mapping(address => uint256) public s_liquidatedCollateral;
+
+    // KYC restriction(unimplemented)
+    // mapping(address => bool) public s_isKYCed;
 
     uint256[50] private __gap;
 
@@ -130,8 +131,8 @@ contract LendingCore is
      */
     function depositCollateral(address _token, uint256 _amount) external nonReentrant whenNotPaused {
         require(_token != address(0), LendingCore__InvalidAddress());
-        require(_amount > 0, LendingCore__ZeroAmount());
-        require(s_collateralManager.s_isCollateralTokenSupported(_token), LendingCore__TokenNotSupported());
+        require(_amount > 0, LendingCore__ZeroAmountNotAllowed());
+        require(s_collateralManager.s_isCollateralTokenSupported(_token), LendingCore__UnsupportedToken(_token));
 
         IERC20Metadata(_token).safeTransferFrom(msg.sender, address(this), _amount);
         s_collateralManager.deposit(msg.sender, _token, _amount);
@@ -145,14 +146,16 @@ contract LendingCore is
      * @param _amount amount to withdraw
      */
     function withdrawCollateral(address _token, uint256 _amount) external nonReentrant whenNotPaused {
+        uint256 depositedCollateral = s_collateralManager.getDepositedCollateral(msg.sender, _token);
+
         require(_token != address(0), LendingCore__InvalidAddress());
-        require(_amount > 0, LendingCore__ZeroAmount());
-        require(s_collateralManager.s_isCollateralTokenSupported(_token), LendingCore__TokenNotSupported());
-        require(
-            s_collateralManager.getDepositedCollateral(msg.sender, _token) >= _amount, LendingCore__AmountExceedsLimit()
-        );
+        require(_amount > 0, LendingCore__ZeroAmountNotAllowed());
+        require(s_collateralManager.s_isCollateralTokenSupported(_token), LendingCore__UnsupportedToken(_token));
+        require(depositedCollateral >= _amount, LendingCore__AmountExceedsLimit(depositedCollateral, _amount));
 
         s_collateralManager.withdraw(msg.sender, _token, _amount);
+        require(_getHealthFactor(msg.sender, _token) >= BPS_DENOMINATOR, LendingCore__LoanIsActive());
+
         IERC20Metadata(_token).safeTransfer(msg.sender, _amount);
 
         emit CollateralWithdrawn(msg.sender, _token, _amount);
@@ -170,13 +173,22 @@ contract LendingCore is
         nonReentrant
         whenNotPaused
     {
+        uint256 maxBorrowDuration = s_maxBorrowDuration;
+        uint256 availableLiquidity = IERC20Metadata(_borrowToken).balanceOf(address(this));
+
         require(_borrowToken != address(0) && _collateralToken != address(0), LendingCore__InvalidAddress());
-        require(_amount > 0 && _duration >= 1 days, LendingCore__ZeroAmount());
-        require(_duration <= s_maxBorrowDuration, LendingCore__DurationExceedsLimit());
-        require(s_collateralManager.s_isCollateralTokenSupported(_collateralToken), LendingCore__TokenNotSupported());
-        require(s_isBorrowTokenSupported[_borrowToken], LendingCore__TokenNotSupported());
-        require(_getTotalTokenValueInUsd(msg.sender, _collateralToken) > 0, LendingCore__InsufficientBalance());
-        require(IERC20Metadata(_borrowToken).balanceOf(address(this)) >= _amount, LendingCore__InsufficientLiquidity());
+        require(_amount > 0 && _duration >= 1 days, LendingCore__ZeroAmountNotAllowed());
+        require(_duration <= maxBorrowDuration, LendingCore__DurationExceedsLimit(maxBorrowDuration, _duration));
+        require(
+            s_collateralManager.s_isCollateralTokenSupported(_collateralToken),
+            LendingCore__UnsupportedToken(_collateralToken)
+        );
+        require(s_isBorrowTokenSupported[_borrowToken], LendingCore__UnsupportedToken(_borrowToken));
+        // require(_getTotalTokenValueInUsd(msg.sender, _collateralToken) > 0, LendingCore__InsufficientBalance());
+        require(availableLiquidity >= _amount, LendingCore__InsufficientBalance(_borrowToken, availableLiquidity));
+
+        Loan storage userLoan = s_userLoans[msg.sender][_collateralToken];
+        require(!userLoan.active, LendingCore__LoanIsActive());
 
         uint256 interestRateBPS = s_interestRateModel.getBorrowRateBPS(_duration, getUtilizationBPS(_borrowToken));
 
@@ -186,11 +198,10 @@ contract LendingCore is
             BPS_DENOMINATOR + interestRateBPS
         );
 
-        if (_amount > maxBorrowAfterInterest) revert LendingCore__AmountExceedsLimit();
+        require(_amount <= maxBorrowAfterInterest, LendingCore__AmountExceedsLimit(maxBorrowAfterInterest, _amount));
 
         uint256 interestAmount = Math.mulDiv(_amount, interestRateBPS, BPS_DENOMINATOR);
 
-        Loan storage userLoan = s_userLoans[msg.sender][_collateralToken];
         userLoan.borrowToken = _borrowToken;
         userLoan.principal = _amount;
         userLoan.interestAccrued = interestAmount;
@@ -198,6 +209,7 @@ contract LendingCore is
         /// @dev no check for time exploit yet
         userLoan.dueDate = uint40(block.timestamp + _duration);
         userLoan.active = true;
+
         s_totalDebt[_borrowToken] += (_amount + interestAmount);
 
         IERC20Metadata(_borrowToken).safeTransfer(msg.sender, _amount);
@@ -212,17 +224,21 @@ contract LendingCore is
      */
     function repay(address _collateralToken, uint256 _amount) external nonReentrant whenNotPaused {
         require(_collateralToken != address(0), LendingCore__InvalidAddress());
-        require(_amount > 0, LendingCore__ZeroAmount());
+        require(_amount > 0, LendingCore__ZeroAmountNotAllowed());
+        require(
+            s_collateralManager.s_isCollateralTokenSupported(_collateralToken),
+            LendingCore__UnsupportedToken(_collateralToken)
+        );
 
         Loan storage userLoan = s_userLoans[msg.sender][_collateralToken];
         address borrowToken = userLoan.borrowToken;
 
         require(userLoan.active, LendingCore__LoanIsInactive());
-        require(borrowToken != address(0), "Invalid loan state");
+        require(borrowToken != address(0), LendingCore__InvalidAddress());
 
         uint256 remainingDebt = userLoan.principal + userLoan.interestAccrued - userLoan.repaidAmount;
 
-        require(_amount <= remainingDebt, LendingCore__AmountExceedsLimit());
+        require(_amount <= remainingDebt, LendingCore__AmountExceedsLimit(remainingDebt, _amount));
         // require(s_totalDebt[borrowToken] >= _amount, "Internal borrow tracking underflow");
 
         IERC20Metadata(borrowToken).safeTransferFrom(msg.sender, address(this), _amount);
@@ -244,52 +260,70 @@ contract LendingCore is
      * @param _collateralToken the address of collateral token to liquidate
      */
     function liquidate(address _user, address _collateralToken) external onlyRole(LIQUIDATOR_ROLE) nonReentrant {
-        require(_user != address(0) && _collateralToken != address(0), LendingCore__InvalidAddress());
-        // require(_user != msg.sender, "Cannot liquidate self");
-
         Loan memory userLoan = s_userLoans[_user][_collateralToken];
-        uint256 totalDebt = userLoan.principal + userLoan.interestAccrued;
-        require(userLoan.active && totalDebt > userLoan.repaidAmount, LendingCore__LoanIsInactive());
 
-        address borrowToken = userLoan.borrowToken;
-        require(borrowToken != address(0), LendingCore__InvalidAddress());
-
+        require(_user != address(0) && _collateralToken != address(0), LendingCore__InvalidAddress());
+        require(
+            s_collateralManager.s_isCollateralTokenSupported(_collateralToken),
+            LendingCore__UnsupportedToken(_collateralToken)
+        );
         require(
             _getHealthFactor(_user, _collateralToken) < BPS_DENOMINATOR || userLoan.dueDate < block.timestamp,
             LendingCore__NotLiquidateable()
         );
 
-        uint256 userDebtUsd = s_priceOracle.getValue(borrowToken, totalDebt - userLoan.repaidAmount);
+        address borrowToken = userLoan.borrowToken;
+        uint256 totalDebt = userLoan.principal + userLoan.interestAccrued;
+        uint256 remainingDebt = totalDebt - userLoan.repaidAmount;
+        uint256 userDebtUsd = s_priceOracle.getValue(borrowToken, remainingDebt);
 
-        uint256 denominator = Math.mulDiv(
-            s_ltvBPS[_collateralToken], BPS_DENOMINATOR + s_liquidationPenaltyBPS[_collateralToken], BPS_DENOMINATOR
-        );
-        uint256 repayAmountUsd = Math.mulDiv(userDebtUsd, BPS_DENOMINATOR, denominator);
-        if (repayAmountUsd > userDebtUsd) repayAmountUsd = userDebtUsd;
+        require(userLoan.active && totalDebt > userLoan.repaidAmount, LendingCore__LoanIsInactive());
+        require(borrowToken != address(0), LendingCore__InvalidAddress());
 
-        uint256 repayTokenAmount = _usdToTokenAmount(repayAmountUsd, borrowToken);
-        uint256 repayable = totalDebt - userLoan.repaidAmount;
-        if (repayTokenAmount > repayable) repayTokenAmount = repayable;
+        uint256 repayAmountUsd;
+        uint256 repayTokenAmount;
 
-        require(s_totalDebt[borrowToken] >= repayTokenAmount, "Debt underflow");
-        s_totalDebt[borrowToken] -= repayTokenAmount;
-        s_userLoans[_user][_collateralToken].repaidAmount += repayTokenAmount;
+        {
+            uint256 denominator = Math.mulDiv(
+                s_ltvBPS[_collateralToken], BPS_DENOMINATOR + s_liquidationPenaltyBPS[_collateralToken], BPS_DENOMINATOR
+            );
+            repayAmountUsd = Math.mulDiv(userDebtUsd, BPS_DENOMINATOR, denominator);
+            if (repayAmountUsd > userDebtUsd) {
+                repayAmountUsd = userDebtUsd;
+            }
+
+            repayTokenAmount = _usdToTokenAmount(repayAmountUsd, userLoan.borrowToken);
+        }
+
+        if (repayTokenAmount > remainingDebt) repayTokenAmount = remainingDebt;
+
+        require(s_totalDebt[borrowToken] >= repayTokenAmount, LendingCore__MathOverflow());
+
+        uint256 seizeAmount;
+        {
+            uint256 penaltyUsd = Math.mulDiv(repayAmountUsd, s_liquidationPenaltyBPS[_collateralToken], BPS_DENOMINATOR);
+            uint256 totalSeizeUsd = repayAmountUsd + penaltyUsd;
+            seizeAmount = _usdToTokenAmount(totalSeizeUsd, _collateralToken);
+            uint256 collateralBalance = s_collateralManager.getDepositedCollateral(_user, _collateralToken);
+
+            if (seizeAmount > collateralBalance) {
+                seizeAmount = collateralBalance;
+                totalSeizeUsd = s_priceOracle.getValue(_collateralToken, seizeAmount);
+                repayAmountUsd = totalSeizeUsd - penaltyUsd;
+                repayTokenAmount = _usdToTokenAmount(repayAmountUsd, borrowToken);
+            }
+        }
 
         if (s_userLoans[_user][_collateralToken].repaidAmount >= totalDebt) {
+            // or just set the loan as inactive
             delete s_userLoans[_user][_collateralToken];
         }
 
-        uint256 penaltyUsd = Math.mulDiv(repayAmountUsd, s_liquidationPenaltyBPS[_collateralToken], BPS_DENOMINATOR);
-        uint256 totalSeizeUsd = repayAmountUsd + penaltyUsd;
-        uint256 seizeAmount = _usdToTokenAmount(totalSeizeUsd, _collateralToken);
-
-        // require(
-        //     s_collateralManager.getUserCollateralAmount(_user, _collateralToken) >= seizeAmount,
-        //     "Insufficient collateral to seize"
-        // );
-
+        s_totalDebt[borrowToken] -= repayTokenAmount;
+        s_userLoans[_user][_collateralToken].repaidAmount += repayTokenAmount;
+        s_userLoans[_user][_collateralToken].totalLiquidated += seizeAmount;
+        s_liquidatedCollateral[_collateralToken] += seizeAmount;
         s_collateralManager.withdraw(_user, _collateralToken, seizeAmount);
-        s_liquidatedFunds[_collateralToken] += seizeAmount;
 
         emit Liquidated(_user, _collateralToken, seizeAmount);
     }
@@ -301,6 +335,10 @@ contract LendingCore is
      * @param _amount amount of liquidity to add
      */
     function addLiquidity(address _token, uint256 _amount) external onlyRole(LIQUIDITY_PROVIDER_ROLE) nonReentrant {
+        require(s_isBorrowTokenSupported[_token], LendingCore__UnsupportedToken(_token));
+        require(_token != address(0), LendingCore__InvalidAddress());
+        require(_amount > 0, LendingCore__ZeroAmountNotAllowed());
+
         IERC20Metadata(_token).safeTransferFrom(msg.sender, address(this), _amount);
         emit SupplyAdded(_token, msg.sender, _amount);
     }
@@ -311,6 +349,13 @@ contract LendingCore is
      * @param _amount amount of liquidity to remove
      */
     function removeLiquidity(address _token, uint256 _amount) external onlyRole(LIQUIDITY_PROVIDER_ROLE) nonReentrant {
+        uint256 availableLiquidity = IERC20Metadata(_token).balanceOf(address(this));
+
+        require(s_isBorrowTokenSupported[_token], LendingCore__UnsupportedToken(_token));
+        require(_token != address(0), LendingCore__InvalidAddress());
+        require(_amount > 0, LendingCore__ZeroAmountNotAllowed());
+        require(availableLiquidity >= _amount, LendingCore__InsufficientBalance(_token, availableLiquidity));
+
         IERC20Metadata(_token).safeTransfer(msg.sender, _amount);
         emit SupplyRemoved(_token, msg.sender, _amount);
     }
@@ -319,6 +364,16 @@ contract LendingCore is
         external
         onlyRole(LIQUIDITY_PROVIDER_ROLE)
     {
+        uint256 availableAmount = s_liquidatedCollateral[_collateralToken];
+
+        require(
+            s_collateralManager.s_isCollateralTokenSupported(_collateralToken),
+            LendingCore__UnsupportedToken(_collateralToken)
+        );
+        require(_collateralToken != address(0), LendingCore__InvalidAddress());
+        require(_amount > 0, LendingCore__ZeroAmountNotAllowed());
+        require(availableAmount >= _amount, LendingCore__InsufficientBalance(_collateralToken, availableAmount));
+
         IERC20Metadata(_collateralToken).safeTransfer(msg.sender, _amount);
     }
 
@@ -329,6 +384,10 @@ contract LendingCore is
      * @param _ltvBps the LTV Ratio in Basis Points
      */
     function setLTV(address _token, uint16 _ltvBps) external onlyRole(PARAMETER_MANAGER_ROLE) {
+        require(_token != address(0), LendingCore__InvalidAddress());
+        require(_ltvBps > 0, LendingCore__ZeroAmountNotAllowed());
+        require(_ltvBps <= BPS_DENOMINATOR, LendingCore__AmountExceedsLimit(BPS_DENOMINATOR, _ltvBps));
+
         s_ltvBPS[_token] = _ltvBps;
     }
 
@@ -345,7 +404,7 @@ contract LendingCore is
      * @notice set maximum borrow duration
      * @param _duration the duration in seconds
      */
-    function setMaxBorrowDuration(uint64 _duration) external onlyRole(PARAMETER_MANAGER_ROLE) {
+    function setMaxBorrowDuration(uint40 _duration) external onlyRole(PARAMETER_MANAGER_ROLE) {
         s_maxBorrowDuration = _duration;
     }
 
@@ -353,7 +412,7 @@ contract LendingCore is
      * @notice set grace period
      * @param _period the period duration in seconds
      */
-    function setGracePeriod(uint64 _period) external onlyRole(PARAMETER_MANAGER_ROLE) {
+    function setGracePeriod(uint40 _period) external onlyRole(PARAMETER_MANAGER_ROLE) {
         s_gracePeriod = _period;
     }
 
@@ -495,7 +554,7 @@ contract LendingCore is
         pure
         returns (uint256 normalizedValue)
     {
-        require(_fromDecimal <= 77 && _toDecimal <= 77, LendingCore__OverflowOrUnderflow());
+        require(_fromDecimal <= 77 && _toDecimal <= 77, LendingCore__MathOverflow());
 
         if (_fromDecimal == _toDecimal) {
             normalizedValue = _value;
