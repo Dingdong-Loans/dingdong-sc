@@ -17,7 +17,7 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
 /// @dev delete this! testing only
 // import {console} from "forge-std/console.sol";
 
-contract LendingCore is
+contract LendingCoreV1 is
     Initializable,
     PausableUpgradeable,
     AccessControlUpgradeable,

@@ -2,7 +2,7 @@
 pragma solidity ^0.8.27;
 
 import {Test, console} from "forge-std/Test.sol";
-import {LendingCore} from "../../src/core/LendingCoreV1.sol";
+import {LendingCoreV1} from "../../src/core/LendingCoreV1.sol";
 import {CollateralManager} from "../../src/core/CollateralManager.sol";
 import {InterestRateModel} from "../../src/core/InterestRateModel.sol";
 import {PriceOracle} from "../../src/core/PriceOracle.sol";
@@ -35,8 +35,8 @@ contract LendingCoreV1Test is Test {
     bytes32 constant queryIdETH = keccak256(queryDataETH);
 
     ERC1967Proxy public lendingProxy;
-    LendingCore public lending;
-    LendingCore public castLendingProxy;
+    LendingCoreV1 public lending;
+    LendingCoreV1 public castLendingProxy;
 
     ERC1967Proxy public collateralManagerProxy;
     CollateralManager public collateralManager;
@@ -79,15 +79,15 @@ contract LendingCoreV1Test is Test {
 
     function setUp() public {
         vm.startPrank(admin);
-        // initialize LendingCore
+        // initialize LendingCoreV1
         bytes memory initializeLendingData = abi.encodeWithSelector(
-            LendingCore.initialize.selector,
+            LendingCoreV1.initialize.selector,
             admin,
             [pauser, upgrader, parameterManager, tokenManager, liquidityProvider, liquidator]
         );
-        lending = new LendingCore();
+        lending = new LendingCoreV1();
         lendingProxy = new ERC1967Proxy(address(lending), initializeLendingData);
-        castLendingProxy = LendingCore(address(lendingProxy));
+        castLendingProxy = LendingCoreV1(address(lendingProxy));
 
         // initialize CollateralManager
         bytes memory initializeCollateralManagerData =
@@ -103,11 +103,11 @@ contract LendingCoreV1Test is Test {
         vm.stopPrank();
 
         vm.startPrank(upgrader);
-        // set CollateralManager in LendingCore
+        // set CollateralManager in LendingCoreV1
         castLendingProxy.setCollateralManager(address(collateralManagerProxy));
-        // set InterestRateModel in LendingCore
+        // set InterestRateModel in LendingCoreV1
         castLendingProxy.setInterestRateModel(address(interestRateModel));
-        // set PriceOracle in LendingCore
+        // set PriceOracle in LendingCoreV1
         castLendingProxy.setPriceOracle(address(priceOracle));
         vm.stopPrank();
     }
@@ -310,7 +310,7 @@ contract LendingCoreV1Test is Test {
         castLendingProxy.borrow(address(tokenUSDT), borrowAmount, address(tokenBTC), 30 days);
         vm.stopPrank();
 
-        LendingCore.Loan memory loan = castLendingProxy.getUserLoan(user1, address(tokenBTC));
+        LendingCoreV1.Loan memory loan = castLendingProxy.getUserLoan(user1, address(tokenBTC));
         assertEq(loan.borrowToken, address(tokenUSDT));
         assertEq((loan.principal + loan.interestAccrued) > borrowAmount, true);
         assertTrue(loan.active);
@@ -338,7 +338,7 @@ contract LendingCoreV1Test is Test {
         vm.stopPrank();
 
         _fund(address(tokenUSDT), user1, borrowAmount);
-        LendingCore.Loan memory loanBefore = castLendingProxy.getUserLoan(user1, address(tokenBTC));
+        LendingCoreV1.Loan memory loanBefore = castLendingProxy.getUserLoan(user1, address(tokenBTC));
 
         uint256 repayAmount = borrowAmount;
         vm.startPrank(user1);
@@ -346,7 +346,7 @@ contract LendingCoreV1Test is Test {
         castLendingProxy.repay(address(tokenBTC), repayAmount);
         vm.stopPrank();
 
-        LendingCore.Loan memory loanAfter = castLendingProxy.getUserLoan(user1, address(tokenBTC));
+        LendingCoreV1.Loan memory loanAfter = castLendingProxy.getUserLoan(user1, address(tokenBTC));
         assertEq(loanAfter.repaidAmount, loanBefore.repaidAmount + repayAmount);
     }
 
@@ -380,7 +380,7 @@ contract LendingCoreV1Test is Test {
         castLendingProxy.repay(address(tokenBTC), repayAmount);
         vm.stopPrank();
 
-        LendingCore.Loan memory loanAfter = castLendingProxy.getUserLoan(user1, address(tokenBTC));
+        LendingCoreV1.Loan memory loanAfter = castLendingProxy.getUserLoan(user1, address(tokenBTC));
 
         // check if loan information resets immediately after full repayment
         assertEq(loanAfter.principal, 0);
@@ -462,7 +462,7 @@ contract LendingCoreV1Test is Test {
         castLendingProxy.liquidate(user1, address(tokenBTC));
         vm.stopPrank();
 
-        LendingCore.Loan memory loanAfter = castLendingProxy.getUserLoan(user1, address(tokenBTC));
+        LendingCoreV1.Loan memory loanAfter = castLendingProxy.getUserLoan(user1, address(tokenBTC));
 
         // 7. Post-conditions
         assertGt(loanAfter.repaidAmount, 0, "should have repaid some USDT");
