@@ -41,6 +41,7 @@ contract LendingCore is
 
     // ========== ERRORS ==========
     error LendingCore__InvalidAddress();
+    error LendingCore__CollateralManagerAlreadySet();
     error LendingCore__MathOverflow();
     error LendingCore__ZeroAmountNotAllowed();
     error LendingCore__AmountExceedsLimit(uint256 max, uint256 attempted);
@@ -55,7 +56,6 @@ contract LendingCore is
     struct Loan {
         uint256 principal;
         uint256 interestAccrued;
-        uint256 interestRateBPS;
         uint256 repaidAmount;
         uint256 totalLiquidated;
         address borrowToken;
@@ -90,10 +90,10 @@ contract LendingCore is
 
     // Protocol information
     address[] public s_borrowTokens;
-    mapping(address => uint8) public s_borrowTokenDecimals;
+    // mapping(address => uint8) public s_borrowTokenDecimals;
     mapping(address => bool) public s_isBorrowTokenSupported;
     mapping(address => uint256) public s_totalDebt;
-    mapping(address => mapping(address => Loan)) private s_userLoans;
+    mapping(address => mapping(address => Loan)) public s_userLoans;
     mapping(address => uint256) public s_liquidatedCollateral;
 
     // KYC restriction(unimplemented)
@@ -291,7 +291,6 @@ contract LendingCore is
             if (repayAmountUsd > userDebtUsd) {
                 repayAmountUsd = userDebtUsd;
             }
-
             repayTokenAmount = _usdToTokenAmount(repayAmountUsd, userLoan.borrowToken);
         }
 
@@ -303,6 +302,7 @@ contract LendingCore is
         {
             uint256 penaltyUsd = Math.mulDiv(repayAmountUsd, s_liquidationPenaltyBPS[_collateralToken], BPS_DENOMINATOR);
             uint256 totalSeizeUsd = repayAmountUsd + penaltyUsd;
+
             seizeAmount = _usdToTokenAmount(totalSeizeUsd, _collateralToken);
             uint256 collateralBalance = s_collateralManager.getDepositedCollateral(_user, _collateralToken);
 
@@ -426,7 +426,6 @@ contract LendingCore is
         s_priceOracle.setPriceFeed(_token, _priceFeed);
         /// @dev use try catch
         s_borrowTokens.push(_token);
-        s_borrowTokenDecimals[_token] = IERC20Metadata(_token).decimals();
         s_isBorrowTokenSupported[_token] = true;
 
         emit BorrowTokenAdded(_token, msg.sender);
@@ -493,11 +492,12 @@ contract LendingCore is
 
     // ========== UPGRADER_ROLE FUNCTIONS ==========
     /**
-     * @notice set collateral manager (once)
+     * @notice set collateral manager (only once)
      * @param _collateralManager the address of collateral manager
-     * @dev CollateralManager intent to be assign only once, since it stores user
+     * @dev CollateralManager intent to be assign only once, since it stores user balances
      */
     function setCollateralManager(address _collateralManager) external onlyRole(UPGRADER_ROLE) {
+        require(address(s_collateralManager) == address(0), LendingCore__CollateralManagerAlreadySet());
         s_collateralManager = ICollateralManager(_collateralManager);
     }
 
@@ -533,10 +533,10 @@ contract LendingCore is
      * @param _amountUsd the amount of usd to convert to token
      * @param _token the address of token to convert the _amountUsd to
      * @return amount the amount of token that can be acquired with _amountUsd
-     * @dev this function suppose to be a view function, it's not because the oracle require updating state
+     * @dev this function suppose to be a view function, it's not because the oracle require updating state, also this tied to borrow token
      */
     function _usdToTokenAmount(uint256 _amountUsd, address _token) internal returns (uint256 amount) {
-        uint256 tokenDecimals = 10 ** s_borrowTokenDecimals[_token];
+        uint256 tokenDecimals = 10 ** IERC20Metadata(_token).decimals();
         uint256 debtTokenPrice = s_priceOracle.getValue(_token, tokenDecimals);
 
         amount = Math.mulDiv(_amountUsd, tokenDecimals, debtTokenPrice);

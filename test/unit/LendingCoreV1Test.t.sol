@@ -11,8 +11,12 @@ import {TellorPlayground} from "@tellor/contracts/TellorPlayground.sol";
 import {MockERC20} from "../mocks/MockERC20.sol";
 import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
 import {IERC20Metadata} from "@openzeppelin/contracts/interfaces/IERC20Metadata.sol";
+import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
 contract LendingCoreV1Test is Test {
+    // event redeclaration
+    event Liquidated(address indexed user, address indexed token, uint256 seizedAmount);
+
     string constant USD = "usd";
     string constant USDT = "usdt";
     string constant IDRX = "idrx";
@@ -196,6 +200,13 @@ contract LendingCoreV1Test is Test {
         vm.stopPrank();
     }
 
+    function _usdToTokenAmount(uint256 _amountUsd, address _token) internal returns (uint256 amount) {
+        uint256 tokenDecimals = 10 ** IERC20Metadata(_token).decimals();
+        uint256 debtTokenPrice = priceOracle.getValue(_token, tokenDecimals);
+
+        amount = Math.mulDiv(_amountUsd, tokenDecimals, debtTokenPrice);
+    }
+
     function test_checkInitialization() public view {
         // Check that roles are properly assigned
         assertTrue(castLendingProxy.hasRole(castLendingProxy.DEFAULT_ADMIN_ROLE(), admin));
@@ -374,13 +385,93 @@ contract LendingCoreV1Test is Test {
         // check if loan information resets immediately after full repayment
         assertEq(loanAfter.principal, 0);
         assertEq(loanAfter.interestAccrued, 0);
-        assertEq(loanAfter.interestRateBPS, 0);
         assertEq(loanAfter.repaidAmount, 0);
         assertEq(loanAfter.totalLiquidated, 0);
         assertEq(loanAfter.borrowToken, address(0));
         assertEq(loanAfter.startTime, 0);
         assertEq(loanAfter.dueDate, 0);
         assertFalse(loanAfter.active);
+    }
+
+    function testLiquidate() public {
+        // 1. Setup tokens, price-feeds, and protocol parameters
+        uint16 ltv = 7000; // 70%
+        uint16 liquidationPenalty = 500; // 5%
+
+        _setupTokensAndPriceFeeds();
+        _addCollateralToken(address(tokenBTC), address(pricefeedBTC));
+        _addBorrowToken(address(tokenUSDT), address(pricefeedUSDT));
+        _setLTV(address(tokenBTC), ltv);
+        _setMaxBorrowDuration(365 days);
+        _setLiquidationPenalty(address(tokenBTC), liquidationPenalty);
+
+        // 2. User1 deposits 1 BTC as collateral ($100,000)
+        uint256 depositAmount = 1e18;
+        _fund(address(tokenBTC), user1, depositAmount);
+        _approveAndDepositCollateral(user1, address(tokenBTC), depositAmount);
+
+        // 3. LiquidityProvider adds 100,000 USDT to the pool
+        uint256 lpAmount = 100_000e18;
+        _fund(address(tokenUSDT), liquidityProvider, lpAmount);
+        _addLiquidity(address(tokenUSDT), lpAmount);
+
+        // 4. User1 borrows under LTV limit
+        vm.startPrank(user1);
+        uint256 borrowUsd = 100_000e8 * 5_000 / 10_000; // = 50,000 USD (in 8 decimals)
+        uint256 borrowAmount = borrowUsd * 1e18 / priceUSDT; // 50,000e8 * 1e18 / 1e8 = 50,000e18
+        castLendingProxy.borrow(address(tokenUSDT), borrowAmount, address(tokenBTC), 30 days);
+        vm.stopPrank();
+
+        // 5. Simulate price crash: BTC drops 25% to $75.000
+        vm.startPrank(oracleHandler);
+        tellorOracle.submitValue(queryIdBTC, abi.encode(priceBTC - (priceBTC / 5)), 0, queryDataBTC);
+        vm.warp(block.timestamp + DISPUTE_BUFFER + 1);
+        vm.stopPrank();
+
+        // 6. Liquidator performs liquidation
+        (uint256 principal, uint256 interestAccrued, uint256 repaid,, address borrowToken,,,) =
+            castLendingProxy.s_userLoans(user1, address(tokenBTC));
+        vm.startPrank(liquidator);
+
+        // same calculations as in core contract
+        uint256 BPS_DENOMINATOR = 10000;
+
+        uint256 userRemainingDebt = principal + interestAccrued - repaid;
+        uint256 userDebtUsd = priceOracle.getValue(borrowToken, userRemainingDebt);
+
+        uint256 repayAmountUsd;
+        uint256 repayTokenAmount;
+
+        uint256 denominator = Math.mulDiv(ltv, BPS_DENOMINATOR + liquidationPenalty, BPS_DENOMINATOR);
+        repayAmountUsd = Math.mulDiv(userDebtUsd, BPS_DENOMINATOR, denominator);
+        if (repayAmountUsd > userDebtUsd) {
+            repayAmountUsd = userDebtUsd;
+        }
+        repayTokenAmount = _usdToTokenAmount(repayAmountUsd, borrowToken);
+
+        uint256 expectedSeizeAmount;
+
+        uint256 penaltyUsd = Math.mulDiv(repayAmountUsd, liquidationPenalty, BPS_DENOMINATOR);
+        uint256 totalSeizeUsd = repayAmountUsd + penaltyUsd;
+
+        expectedSeizeAmount = _usdToTokenAmount(totalSeizeUsd, address(tokenBTC));
+
+        vm.expectEmit(true, true, false, true);
+        emit Liquidated(user1, address(tokenBTC), expectedSeizeAmount);
+
+        castLendingProxy.liquidate(user1, address(tokenBTC));
+        vm.stopPrank();
+
+        LendingCore.Loan memory loanAfter = castLendingProxy.getUserLoan(user1, address(tokenBTC));
+
+        // 7. Post-conditions
+        assertGt(loanAfter.repaidAmount, 0, "should have repaid some USDT");
+        assertEq(loanAfter.totalLiquidated, expectedSeizeAmount, "should have seized some BTC");
+        assertLt(
+            castCollateralManagerProxy.getDepositedCollateral(user1, address(tokenBTC)),
+            depositAmount,
+            "collateral should be reduced"
+        );
     }
 
     function test_addLiquidity_half() public {
