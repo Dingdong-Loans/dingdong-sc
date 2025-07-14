@@ -15,7 +15,7 @@ import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
 /// @dev delete this! testing only
-// import {console} from "forge-std/console.sol";
+import {console} from "forge-std/console.sol";
 
 contract LendingCoreV1 is
     Initializable,
@@ -120,7 +120,6 @@ contract LendingCoreV1 is
         _grantRole(LIQUIDATOR_ROLE, role[5]);
     }
 
-    // ========== OVERRIDE FUNCTIONS ==========
     function _authorizeUpgrade(address newImplementation) internal override onlyRole(UPGRADER_ROLE) {}
 
     // ========== MAIN FUNCTIONS ==========
@@ -154,7 +153,9 @@ contract LendingCoreV1 is
         require(depositedCollateral >= _amount, LendingCore__AmountExceedsLimit(depositedCollateral, _amount));
 
         s_collateralManager.withdraw(msg.sender, _token, _amount);
+        console.log("here");
         require(_getHealthFactor(msg.sender, _token) >= BPS_DENOMINATOR, LendingCore__LoanIsActive());
+        console.log("here2");
 
         IERC20Metadata(_token).safeTransfer(msg.sender, _amount);
 
@@ -173,19 +174,20 @@ contract LendingCoreV1 is
         nonReentrant
         whenNotPaused
     {
-        uint256 maxBorrowDuration = s_maxBorrowDuration;
-        uint256 availableLiquidity = IERC20Metadata(_borrowToken).balanceOf(address(this));
-
         require(_borrowToken != address(0) && _collateralToken != address(0), LendingCore__InvalidAddress());
         require(_amount > 0 && _duration >= 1 days, LendingCore__ZeroAmountNotAllowed());
-        require(_duration <= maxBorrowDuration, LendingCore__DurationExceedsLimit(maxBorrowDuration, _duration));
         require(
             s_collateralManager.s_isCollateralTokenSupported(_collateralToken),
             LendingCore__UnsupportedToken(_collateralToken)
         );
         require(s_isBorrowTokenSupported[_borrowToken], LendingCore__UnsupportedToken(_borrowToken));
+
+        uint256 maxBorrowDuration = s_maxBorrowDuration;
+        uint256 availableLiquidity = IERC20Metadata(_borrowToken).balanceOf(address(this));
+
         // require(_getTotalTokenValueInUsd(msg.sender, _collateralToken) > 0, LendingCore__InsufficientBalance());
         require(availableLiquidity >= _amount, LendingCore__InsufficientBalance(_borrowToken, availableLiquidity));
+        require(_duration <= maxBorrowDuration, LendingCore__DurationExceedsLimit(maxBorrowDuration, _duration));
 
         Loan storage userLoan = s_userLoans[msg.sender][_collateralToken];
         require(!userLoan.active, LendingCore__LoanIsActive());
@@ -231,10 +233,9 @@ contract LendingCoreV1 is
         );
 
         Loan storage userLoan = s_userLoans[msg.sender][_collateralToken];
-        address borrowToken = userLoan.borrowToken;
-
         require(userLoan.active, LendingCore__LoanIsInactive());
-        require(borrowToken != address(0), LendingCore__InvalidAddress());
+
+        address borrowToken = userLoan.borrowToken;
 
         uint256 remainingDebt = userLoan.principal + userLoan.interestAccrued - userLoan.repaidAmount;
 
@@ -267,6 +268,7 @@ contract LendingCoreV1 is
             s_collateralManager.s_isCollateralTokenSupported(_collateralToken),
             LendingCore__UnsupportedToken(_collateralToken)
         );
+
         require(
             _getHealthFactor(_user, _collateralToken) < BPS_DENOMINATOR || userLoan.dueDate < block.timestamp,
             LendingCore__NotLiquidateable()
@@ -274,11 +276,10 @@ contract LendingCoreV1 is
 
         address borrowToken = userLoan.borrowToken;
         uint256 totalDebt = userLoan.principal + userLoan.interestAccrued;
+        require(userLoan.active && totalDebt > userLoan.repaidAmount, LendingCore__LoanIsInactive());
+
         uint256 remainingDebt = totalDebt - userLoan.repaidAmount;
         uint256 userDebtUsd = s_priceOracle.getValue(borrowToken, remainingDebt);
-
-        require(userLoan.active && totalDebt > userLoan.repaidAmount, LendingCore__LoanIsInactive());
-        require(borrowToken != address(0), LendingCore__InvalidAddress());
 
         uint256 repayAmountUsd;
         uint256 repayTokenAmount;
@@ -542,44 +543,16 @@ contract LendingCoreV1 is
         amount = Math.mulDiv(_amountUsd, tokenDecimals, debtTokenPrice);
     }
 
-    /**
-     * @notice normalize a value to desired decimals
-     * @param _value the value to be normalized
-     * @param _fromDecimal the decimal of _value
-     * @param _toDecimal the desired decimal of _value
-     * @return normalizedValue the normalized value in desired decimals
-     */
-    function _getNormalizedDecimals(uint256 _value, uint8 _fromDecimal, uint8 _toDecimal)
-        internal
-        pure
-        returns (uint256 normalizedValue)
-    {
-        require(_fromDecimal <= 77 && _toDecimal <= 77, LendingCore__MathOverflow());
-
-        if (_fromDecimal == _toDecimal) {
-            normalizedValue = _value;
-        }
-
-        uint8 decimalDiff = _fromDecimal > _toDecimal ? _fromDecimal - _toDecimal : _toDecimal - _fromDecimal;
-
-        uint256 scale = 10 ** decimalDiff;
-
-        if (_toDecimal > _fromDecimal) {
-            normalizedValue = Math.mulDiv(_value, scale, 1);
-        } else {
-            normalizedValue = Math.mulDiv(_value, 1, scale);
-        }
-    }
-
     function _getHealthFactor(address _user, address _token) internal returns (uint256) {
-        uint256 collateralValue = _getTotalTokenValueInUsd(_user, _token);
         Loan memory loan = s_userLoans[_user][_token];
         uint256 debtValue = loan.principal + loan.interestAccrued - loan.repaidAmount;
-
         if (debtValue == 0) return type(uint256).max;
 
+        uint256 collateralValueInUsd = _getTotalTokenValueInUsd(_user, _token);
+        uint256 collateralValueInDebtToken = _usdToTokenAmount(collateralValueInUsd, loan.borrowToken);
+
         // Apply LTV to collateral first
-        uint256 riskAdjustedCollateral = Math.mulDiv(collateralValue, s_ltvBPS[_token], BPS_DENOMINATOR);
+        uint256 riskAdjustedCollateral = Math.mulDiv(collateralValueInDebtToken, s_ltvBPS[_token], BPS_DENOMINATOR);
 
         // Then calculate health factor
         return Math.mulDiv(riskAdjustedCollateral, BPS_DENOMINATOR, debtValue);
@@ -609,6 +582,14 @@ contract LendingCoreV1 is
 
     function getUserLoan(address _user, address _token) external view returns (Loan memory) {
         return s_userLoans[_user][_token];
+    }
+
+    function getCurrentInterestRateBPS(address _token, uint256 _duration)
+        external
+        view
+        returns (uint256 interestRateBPS)
+    {
+        return s_interestRateModel.getBorrowRateBPS(_duration, getUtilizationBPS(_token));
     }
 
     function getMaxBorrowBeforeInterest(address _user, address _borrowToken, address _collateralToken)
