@@ -6,9 +6,9 @@ import {MockERC20} from "../../test/mocks/MockERC20.sol";
 
 contract DeployMockERC20Script is Script {
     function run() external {
-        string memory name = vm.envString("TOKEN_NAME");
-        string memory symbol = vm.envString("TOKEN_SYMBOL");
-        uint8 decimals = uint8(vm.envUint("TOKEN_DECIMALS"));
+        string memory name = "Tether USD";
+        string memory symbol = "USDT";
+        uint8 decimals = 18;
 
         vm.startBroadcast();
 

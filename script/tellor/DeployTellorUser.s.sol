@@ -6,9 +6,10 @@ import {TellorUser} from "../../src/tellor/TellorUser.sol";
 
 contract DeployTellorUser is Script {
     function run() external {
+        // Tellor playground must be deployed first
         address payable tellorOracle = payable(vm.envAddress("TELLOR_ORACLE"));
-        string memory base = vm.envString("BASE_ASSET");
-        string memory quote = vm.envString("QUOTE_ASSET");
+        string memory base = "usdt";
+        string memory quote = "usd";
 
         vm.startBroadcast();
         TellorUser oracle = new TellorUser(tellorOracle, base, quote);

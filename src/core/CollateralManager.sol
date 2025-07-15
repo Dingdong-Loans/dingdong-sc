@@ -10,7 +10,7 @@ contract CollateralManager is Initializable, OwnableUpgradeable, UUPSUpgradeable
     // ========== STORAGE ==========
     address[] public s_collateralTokens;
     mapping(address => bool) public s_isCollateralTokenSupported;
-    mapping(address => mapping(address => uint256)) private s_collateralBalance;
+    mapping(address => mapping(address => uint256)) public s_collateralBalance;
 
     /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {

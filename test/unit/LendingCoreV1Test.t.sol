@@ -205,7 +205,7 @@ contract LendingCoreV1Test is Test {
         amount = Math.mulDiv(_amountUsd, tokenDecimals, debtTokenPrice);
     }
 
-    function test_checkInitialization() public view {
+    function test_initialization() public view {
         // Check that roles are properly assigned
         assertTrue(castLendingProxy.hasRole(castLendingProxy.DEFAULT_ADMIN_ROLE(), admin));
         assertTrue(castLendingProxy.hasRole(castLendingProxy.PAUSER_ROLE(), pauser));
