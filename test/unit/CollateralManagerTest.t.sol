@@ -101,4 +101,6 @@ contract CollateralManagerTest is Test {
         uint256 depositedAmount = castManagerProxy.getDepositedCollateral(owner, address(mockToken));
         assertEq(depositedAmount, amount, "Should return the correct deposited collateral amount");
     }
+
+    function test_upgradeToAndCall() public {}
 }
