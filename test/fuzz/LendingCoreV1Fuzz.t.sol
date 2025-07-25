@@ -6,7 +6,6 @@ import {LendingCoreV1} from "../../src/core/LendingCoreV1.sol";
 import {CollateralManager} from "../../src/core/CollateralManager.sol";
 import {InterestRateModel} from "../../src/core/InterestRateModel.sol";
 import {PriceOracle} from "../../src/core/PriceOracle.sol";
-import {TellorUser} from "../../src/tellor/TellorUser.sol";
 import {TellorPlayground} from "@tellor/contracts/TellorPlayground.sol";
 import {MockERC20} from "../mocks/MockERC20.sol";
 import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
@@ -52,10 +51,6 @@ contract LendingCoreV1Fuzz is Test {
     TellorPlayground tellorOracle;
     uint256 public constant DISPUTE_BUFFER = 20 minutes;
     uint256 public constant STALENESS_AGE = 2 hours;
-    TellorUser pricefeedUSDT;
-    TellorUser pricefeedIDRX;
-    TellorUser pricefeedBTC;
-    TellorUser pricefeedETH;
 
     /// @dev mock price value with 8 decimal
     uint256 priceUSDT = 1e8;
@@ -96,7 +91,8 @@ contract LendingCoreV1Fuzz is Test {
         castCollateralManagerProxy = CollateralManager(address(collateralManagerProxy));
 
         // initialize PriceOracle
-        priceOracle = new PriceOracle(address(lendingProxy));
+        tellorOracle = new TellorPlayground();
+        priceOracle = new PriceOracle(address(lendingProxy), payable(address(tellorOracle)));
         // initialize InterestRateModel
         interestRateModel = new InterestRateModel(address(lendingProxy));
         vm.stopPrank();
@@ -114,25 +110,31 @@ contract LendingCoreV1Fuzz is Test {
     // ========== HELPER TESTs ==========
     function _setupTokens() internal {
         vm.startPrank(tokenHandler);
-        tokenUSDT = new MockERC20("USDT", "USDT", 18);
+        tokenUSDT = new MockERC20("Tether USD", "USDT", 18);
         tokenBTC = new MockERC20("Bitcoin", "BTC", 18);
-        tokenIDRX = new MockERC20("Indonesian Rupiahx", "IDRX", 8);
+        tokenIDRX = new MockERC20("Indonesia Rupiah", "IDRX", 8);
         tokenETH = new MockERC20("Ether", "ETH", 8);
         vm.stopPrank();
     }
 
     function _setupPriceFeeds() internal {
         vm.startPrank(oracleHandler);
-        tellorOracle = new TellorPlayground();
-        pricefeedUSDT = new TellorUser(payable(address(tellorOracle)), USDT, USD);
-        pricefeedIDRX = new TellorUser(payable(address(tellorOracle)), IDRX, USD);
-        pricefeedBTC = new TellorUser(payable(address(tellorOracle)), BTC, USD);
-        pricefeedETH = new TellorUser(payable(address(tellorOracle)), ETH, USD);
 
-        tellorOracle.submitValue(queryIdUSDT, abi.encode(priceUSDT), 0, queryDataUSDT);
-        tellorOracle.submitValue(queryIdIDRX, abi.encode(priceIDRX), 0, queryDataIDRX);
-        tellorOracle.submitValue(queryIdBTC, abi.encode(priceBTC), 0, queryDataBTC);
-        tellorOracle.submitValue(queryIdETH, abi.encode(priceETH), 0, queryDataETH);
+        // simulate regularly updated prices
+        uint256 loopCount = 12;
+        uint256 interval = 10 minutes;
+        uint256 startTime = block.timestamp;
+        uint256 blockNum = block.number;
+
+        for (uint256 i = 0; i < loopCount; i++) {
+            vm.warp(startTime + i * interval);
+            vm.roll(blockNum + i); // force a new block
+
+            tellorOracle.submitValue(queryIdUSDT, abi.encode(priceUSDT), 0, queryDataUSDT);
+            tellorOracle.submitValue(queryIdIDRX, abi.encode(priceIDRX), 0, queryDataIDRX);
+            tellorOracle.submitValue(queryIdBTC, abi.encode(priceBTC), 0, queryDataBTC);
+            tellorOracle.submitValue(queryIdETH, abi.encode(priceETH), 0, queryDataETH);
+        }
 
         // ensure value pass dispute buffer
         vm.warp(block.timestamp + DISPUTE_BUFFER + 1);
@@ -157,15 +159,15 @@ contract LendingCoreV1Fuzz is Test {
         vm.stopPrank();
     }
 
-    function _addBorrowToken(address token, address priceFeed) internal {
+    function _addBorrowToken(address token, string memory base, string memory quote) internal {
         vm.startPrank(tokenManager);
-        castLendingProxy.addBorrowToken(token, priceFeed);
+        castLendingProxy.addBorrowToken(token, base, quote);
         vm.stopPrank();
     }
 
-    function _addCollateralToken(address token, address priceFeed) internal {
+    function _addCollateralToken(address token, string memory base, string memory quote) internal {
         vm.startPrank(tokenManager);
-        castLendingProxy.addCollateralToken(token, priceFeed);
+        castLendingProxy.addCollateralToken(token, base, quote);
         vm.stopPrank();
     }
 
@@ -231,7 +233,7 @@ contract LendingCoreV1Fuzz is Test {
         vm.assume(amount > 0);
 
         _setupTokensAndPriceFeeds();
-        _addCollateralToken(address(tokenBTC), address(pricefeedBTC));
+        _addCollateralToken(address(tokenBTC), BTC, USD);
 
         _fund(address(tokenBTC), user, amount);
 
@@ -247,7 +249,7 @@ contract LendingCoreV1Fuzz is Test {
         vm.assume(amount > 0);
 
         _setupTokensAndPriceFeeds();
-        _addCollateralToken(address(tokenBTC), address(pricefeedBTC));
+        _addCollateralToken(address(tokenBTC), BTC, USD);
 
         _fund(address(tokenBTC), user1, amount);
 
@@ -263,7 +265,7 @@ contract LendingCoreV1Fuzz is Test {
         assertEq(castCollateralManagerProxy.getDepositedCollateral(user1, address(tokenBTC)), 0);
     }
 
-    function test_fuzz_borrow(uint256 amount, uint40 duration) public {
+    function test_fuzz_borrow(uint256 _amount, uint40 _duration) public {
         uint40 maxBorrowDuration = 730 days;
         uint16 ltv = 5000;
         uint256 fundLiquidity = 1_000_000e18;
@@ -273,8 +275,8 @@ contract LendingCoreV1Fuzz is Test {
         uint40 minBorrowDuration = 1 days;
 
         _setupTokensAndPriceFeeds();
-        _addBorrowToken(address(tokenUSDT), address(pricefeedUSDT));
-        _addCollateralToken(address(tokenBTC), address(pricefeedBTC));
+        _addBorrowToken(address(tokenUSDT), USDT, USD);
+        _addCollateralToken(address(tokenBTC), BTC, USD);
         _setLTV(address(tokenBTC), ltv);
         _setMaxBorrowAmount(address(tokenUSDT), fundLiquidity);
         _setMinBorrowAmount(address(tokenUSDT), minBorrowAmount);
@@ -288,19 +290,74 @@ contract LendingCoreV1Fuzz is Test {
         uint256 maxBorrowAmount = Math.mulDiv(
             castLendingProxy.getMaxBorrowBeforeInterest(user1, address(tokenUSDT), address(tokenBTC)),
             BPS_DENOMINATOR,
-            BPS_DENOMINATOR + castLendingProxy.getCurrentInterestRateBPS(address(tokenUSDT), duration)
+            BPS_DENOMINATOR + castLendingProxy.getCurrentInterestRateBPS(address(tokenUSDT), _duration)
         );
 
-        vm.assume(amount >= minBorrowAmount && amount <= maxBorrowAmount);
-        vm.assume(duration <= maxBorrowDuration && duration >= minBorrowDuration);
+        vm.assume(_amount >= minBorrowAmount && _amount <= maxBorrowAmount);
+        vm.assume(_duration <= maxBorrowDuration && _duration >= minBorrowDuration);
 
         vm.startPrank(user1);
-        castLendingProxy.borrow(address(tokenUSDT), amount, address(tokenBTC), duration);
+        castLendingProxy.borrow(address(tokenUSDT), _amount, address(tokenBTC), _duration);
         vm.stopPrank();
 
         LendingCoreV1.Loan memory loan = castLendingProxy.getUserLoan(user1, address(tokenBTC));
         assertEq(loan.borrowToken, address(tokenUSDT));
-        assertTrue(loan.principal + loan.interestAccrued > amount);
+        assertTrue(loan.principal + loan.interestAccrued > _amount);
         assertTrue(loan.active);
+    }
+
+    function test_fuzz_repay(uint256 _amount, uint40 _duration) public {
+        uint40 maxBorrowDuration = 730 days;
+        uint16 ltv = 5000;
+        uint256 fundLiquidity = 1_000_000e18;
+        uint256 fundCollateral = 1e18;
+
+        uint256 minBorrowAmount = 1e18; // 1 USDT minimum
+        uint40 minBorrowDuration = 1 days;
+
+        _setupTokensAndPriceFeeds();
+        _addBorrowToken(address(tokenUSDT), USDT, USD);
+        _addCollateralToken(address(tokenBTC), BTC, USD);
+        _setLTV(address(tokenBTC), ltv);
+        _setMaxBorrowAmount(address(tokenUSDT), fundLiquidity);
+        _setMinBorrowAmount(address(tokenUSDT), minBorrowAmount);
+        _setMaxBorrowDuration(maxBorrowDuration);
+        _setMinBorrowDuration(minBorrowDuration);
+        _fund(address(tokenBTC), user1, fundCollateral);
+        _fund(address(tokenUSDT), user1, fundLiquidity);
+        _fund(address(tokenUSDT), liquidityProvider, fundLiquidity);
+        _addLiquidity(address(tokenUSDT), fundLiquidity);
+        _approveAndDepositCollateral(user1, address(tokenBTC), fundCollateral);
+
+        vm.assume(_duration <= maxBorrowDuration && _duration >= minBorrowDuration);
+
+        uint256 interestRate = castLendingProxy.getCurrentInterestRateBPS(address(tokenUSDT), _duration);
+        uint256 maxBorrowAmount = Math.mulDiv(
+            castLendingProxy.getMaxBorrowBeforeInterest(user1, address(tokenUSDT), address(tokenBTC)),
+            BPS_DENOMINATOR,
+            BPS_DENOMINATOR + interestRate
+        );
+
+        vm.assume(_amount >= minBorrowAmount && _amount <= maxBorrowAmount);
+
+        vm.startPrank(user1);
+        castLendingProxy.borrow(address(tokenUSDT), _amount, address(tokenBTC), _duration);
+
+        LendingCoreV1.Loan memory loanBefore = castLendingProxy.getUserLoan(user1, address(tokenBTC));
+        uint256 totalDebt = loanBefore.principal + loanBefore.interestAccrued;
+        uint256 liquidityBefore = castLendingProxy.getAvailableSupply(address(tokenUSDT));
+
+        // repay
+        IERC20Metadata(address(tokenUSDT)).approve(address(lendingProxy), totalDebt);
+
+        castLendingProxy.repay(address(tokenBTC), totalDebt);
+        vm.stopPrank();
+
+        uint256 liquidityAfter = castLendingProxy.getAvailableSupply(address(tokenUSDT));
+
+        LendingCoreV1.Loan memory loanAfter = castLendingProxy.getUserLoan(user1, address(tokenBTC));
+        assertEq(loanAfter.principal + loanAfter.interestAccrued, 0);
+        assertEq(loanAfter.active, false);
+        assertGt(liquidityAfter, liquidityBefore);
     }
 }

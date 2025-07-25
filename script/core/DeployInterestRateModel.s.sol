@@ -6,7 +6,7 @@ import {InterestRateModel} from "../../src/core/InterestRateModel.sol";
 
 contract DeployInterestRateModel is Script {
     function run() external {
-        address initialOwner = vm.envAddress("INITIAL_OWNER");
+        address initialOwner = vm.envAddress("CORE_PROXY");
 
         vm.startBroadcast();
         InterestRateModel irm = new InterestRateModel(initialOwner);

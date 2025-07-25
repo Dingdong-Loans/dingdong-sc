@@ -4,10 +4,10 @@ pragma solidity ^0.8.27;
 import {Script, console} from "forge-std/Script.sol";
 import {MockERC20} from "../../test/mocks/MockERC20.sol";
 
-contract DeployMockERC20Script is Script {
+contract DeployMockERC20 is Script {
     function run() external {
-        string memory name = "Tether USD";
-        string memory symbol = "USDT";
+        string memory name = "Wrapped Ether";
+        string memory symbol = "WETH";
         uint8 decimals = 18;
 
         vm.startBroadcast();

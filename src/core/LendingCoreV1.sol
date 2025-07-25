@@ -14,9 +14,6 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
-/// @dev delete this! testing only
-import {console} from "forge-std/console.sol";
-
 contract LendingCoreV1 is
     Initializable,
     PausableUpgradeable,
@@ -43,7 +40,7 @@ contract LendingCoreV1 is
     error LendingCore__InvalidAddress();
     error LendingCore__CollateralManagerAlreadySet();
     error LendingCore__MathOverflow();
-    error LendingCore__ZeroAmountNotAllowed();
+    error LendingCore__ParamZeroNotAllowed();
     error LendingCore__AmountExceedsLimit(uint256 max, uint256 attempted);
     error LendingCore__DurationExceedsLimit(uint256 max, uint256 attemted);
     error LendingCore__InsufficientBalance(address token, uint256 available);
@@ -51,6 +48,7 @@ contract LendingCoreV1 is
     error LendingCore__LoanIsActive();
     error LendingCore__LoanIsInactive();
     error LendingCore__UnsupportedToken(address token);
+    error LendingCore__TokenAlreadySupported(address token);
     error LendingCore__NotLiquidateable();
 
     // ========== TYPE DECLARATIONS ==========
@@ -128,49 +126,58 @@ contract LendingCoreV1 is
     // ========== MAIN FUNCTIONS ==========
     /**
      * @notice deposit collateral to protocol
-     * @param _token address of token to deposit
+     * @param _collatearlToken address of token to deposit
      * @param _amount amount to deposit
      */
-    function depositCollateral(address _token, uint256 _amount) external nonReentrant whenNotPaused {
-        require(_token != address(0), LendingCore__InvalidAddress());
-        require(_amount > 0, LendingCore__ZeroAmountNotAllowed());
-        require(s_collateralManager.s_isCollateralTokenSupported(_token), LendingCore__UnsupportedToken(_token));
+    function depositCollateral(address _collatearlToken, uint256 _amount) external nonReentrant whenNotPaused {
+        ICollateralManager collateralManager = s_collateralManager;
 
-        IERC20Metadata(_token).safeTransferFrom(msg.sender, address(this), _amount);
-        s_collateralManager.deposit(msg.sender, _token, _amount);
+        require(_collatearlToken != address(0), LendingCore__InvalidAddress());
+        require(_amount != 0, LendingCore__ParamZeroNotAllowed());
+        require(
+            collateralManager.s_isCollateralTokenSupported(_collatearlToken),
+            LendingCore__UnsupportedToken(_collatearlToken)
+        );
 
-        emit CollateralDeposited(msg.sender, _token, _amount);
+        IERC20Metadata(_collatearlToken).safeTransferFrom(msg.sender, address(this), _amount);
+        collateralManager.deposit(msg.sender, _collatearlToken, _amount);
+
+        emit CollateralDeposited(msg.sender, _collatearlToken, _amount);
     }
 
     /**
      * @notice withdraw collateral to protocol
-     * @param _token address of token to withdraw
+     * @param _collateralToken address of token to withdraw
      * @param _amount amount to withdraw
      */
-    function withdrawCollateral(address _token, uint256 _amount) external nonReentrant whenNotPaused {
-        uint256 depositedCollateral = s_collateralManager.getDepositedCollateral(msg.sender, _token);
+    function withdrawCollateral(address _collateralToken, uint256 _amount) external nonReentrant whenNotPaused {
+        ICollateralManager collateralManager = s_collateralManager;
+        uint256 depositedCollateral = collateralManager.getDepositedCollateral(msg.sender, _collateralToken);
 
-        require(_token != address(0), LendingCore__InvalidAddress());
-        require(_amount > 0, LendingCore__ZeroAmountNotAllowed());
-        require(s_collateralManager.s_isCollateralTokenSupported(_token), LendingCore__UnsupportedToken(_token));
+        require(_collateralToken != address(0), LendingCore__InvalidAddress());
+        require(_amount != 0, LendingCore__ParamZeroNotAllowed());
+        require(
+            collateralManager.s_isCollateralTokenSupported(_collateralToken),
+            LendingCore__UnsupportedToken(_collateralToken)
+        );
         require(depositedCollateral >= _amount, LendingCore__AmountExceedsLimit(depositedCollateral, _amount));
 
-        s_collateralManager.withdraw(msg.sender, _token, _amount);
-        require(_getHealthFactor(msg.sender, _token) >= BPS_DENOMINATOR, LendingCore__LoanIsActive());
+        collateralManager.withdraw(msg.sender, _collateralToken, _amount);
+        require(_getHealthFactor(msg.sender, _collateralToken) >= BPS_DENOMINATOR, LendingCore__LoanIsActive());
 
-        IERC20Metadata(_token).safeTransfer(msg.sender, _amount);
+        IERC20Metadata(_collateralToken).safeTransfer(msg.sender, _amount);
 
-        emit CollateralWithdrawn(msg.sender, _token, _amount);
+        emit CollateralWithdrawn(msg.sender, _collateralToken, _amount);
     }
 
     /**
      * @notice borrow token of choice
      * @param _borrowToken the address of token to borrow
-     * @param _amount the amount to borrow
+     * @param _amount the amount of _borrowToken to borrow
      * @param _collateralToken the address of collateral token
      * @param _duration the borrow duration
      */
-    function borrow(address _borrowToken, uint256 _amount, address _collateralToken, uint64 _duration)
+    function borrow(address _borrowToken, uint256 _amount, address _collateralToken, uint256 _duration)
         external
         nonReentrant
         whenNotPaused
@@ -180,7 +187,6 @@ contract LendingCoreV1 is
             _amount >= s_minBorrowAmount[_borrowToken] && _amount <= s_maxBorrowAmount[_borrowToken],
             LendingCore__LoanParamViolated()
         );
-        console.log("here");
         require(_duration >= s_minBorrowDuration && _duration <= s_maxBorrowDuration, LendingCore__LoanParamViolated());
         require(
             s_collateralManager.s_isCollateralTokenSupported(_collateralToken),
@@ -231,7 +237,7 @@ contract LendingCoreV1 is
      */
     function repay(address _collateralToken, uint256 _amount) external nonReentrant whenNotPaused {
         require(_collateralToken != address(0), LendingCore__InvalidAddress());
-        require(_amount > 0, LendingCore__ZeroAmountNotAllowed());
+        require(_amount != 0, LendingCore__ParamZeroNotAllowed());
         require(
             s_collateralManager.s_isCollateralTokenSupported(_collateralToken),
             LendingCore__UnsupportedToken(_collateralToken)
@@ -266,11 +272,12 @@ contract LendingCoreV1 is
      * @param _collateralToken the address of collateral token to liquidate
      */
     function liquidate(address _user, address _collateralToken) external onlyRole(LIQUIDATOR_ROLE) nonReentrant {
-        Loan memory userLoan = s_userLoans[_user][_collateralToken];
+        Loan storage userLoan = s_userLoans[_user][_collateralToken];
+        ICollateralManager collateralManager = s_collateralManager;
 
         require(_user != address(0) && _collateralToken != address(0), LendingCore__InvalidAddress());
         require(
-            s_collateralManager.s_isCollateralTokenSupported(_collateralToken),
+            collateralManager.s_isCollateralTokenSupported(_collateralToken),
             LendingCore__UnsupportedToken(_collateralToken)
         );
 
@@ -301,6 +308,7 @@ contract LendingCoreV1 is
             repayTokenAmount = _usdToTokenAmount(repayAmountUsd, userLoan.borrowToken);
         }
 
+        require(repayTokenAmount != 0, LendingCore__ParamZeroNotAllowed());
         if (repayTokenAmount > remainingDebt) repayTokenAmount = remainingDebt;
 
         require(s_totalDebt[borrowToken] >= repayTokenAmount, LendingCore__MathOverflow());
@@ -311,7 +319,7 @@ contract LendingCoreV1 is
             uint256 totalSeizeUsd = repayAmountUsd + penaltyUsd;
 
             seizeAmount = _usdToTokenAmount(totalSeizeUsd, _collateralToken);
-            uint256 collateralBalance = s_collateralManager.getDepositedCollateral(_user, _collateralToken);
+            uint256 collateralBalance = collateralManager.getDepositedCollateral(_user, _collateralToken);
 
             if (seizeAmount > collateralBalance) {
                 seizeAmount = collateralBalance;
@@ -321,16 +329,15 @@ contract LendingCoreV1 is
             }
         }
 
-        if (s_userLoans[_user][_collateralToken].repaidAmount >= totalDebt) {
-            // or just set the loan as inactive
+        if (userLoan.repaidAmount >= totalDebt) {
             delete s_userLoans[_user][_collateralToken];
         }
 
         s_totalDebt[borrowToken] -= repayTokenAmount;
-        s_userLoans[_user][_collateralToken].repaidAmount += repayTokenAmount;
-        s_userLoans[_user][_collateralToken].totalLiquidated += seizeAmount;
+        userLoan.repaidAmount += repayTokenAmount;
+        userLoan.totalLiquidated += seizeAmount;
         s_liquidatedCollateral[_collateralToken] += seizeAmount;
-        s_collateralManager.withdraw(_user, _collateralToken, seizeAmount);
+        collateralManager.withdraw(_user, _collateralToken, seizeAmount);
 
         emit Liquidated(_user, _collateralToken, seizeAmount);
     }
@@ -338,33 +345,41 @@ contract LendingCoreV1 is
     // ========== LIQUIDITY_PROVIDER_ROLE FUNCTIONS ==========
     /**
      * @notice Add liquidity of specific token
-     * @param _token address of borrow token
+     * @param _borrowToken address of borrow token
      * @param _amount amount of liquidity to add
      */
-    function addLiquidity(address _token, uint256 _amount) external onlyRole(LIQUIDITY_PROVIDER_ROLE) nonReentrant {
-        require(s_isBorrowTokenSupported[_token], LendingCore__UnsupportedToken(_token));
-        require(_token != address(0), LendingCore__InvalidAddress());
-        require(_amount > 0, LendingCore__ZeroAmountNotAllowed());
+    function addLiquidity(address _borrowToken, uint256 _amount)
+        external
+        onlyRole(LIQUIDITY_PROVIDER_ROLE)
+        nonReentrant
+    {
+        require(s_isBorrowTokenSupported[_borrowToken], LendingCore__UnsupportedToken(_borrowToken));
+        require(_borrowToken != address(0), LendingCore__InvalidAddress());
+        require(_amount != 0, LendingCore__ParamZeroNotAllowed());
 
-        IERC20Metadata(_token).safeTransferFrom(msg.sender, address(this), _amount);
-        emit SupplyAdded(_token, msg.sender, _amount);
+        IERC20Metadata(_borrowToken).safeTransferFrom(msg.sender, address(this), _amount);
+        emit SupplyAdded(_borrowToken, msg.sender, _amount);
     }
 
     /**
      * @notice remove liquidity of specific token
-     * @param _token address of borrow token
+     * @param _borrowToken address of borrow token
      * @param _amount amount of liquidity to remove
      */
-    function removeLiquidity(address _token, uint256 _amount) external onlyRole(LIQUIDITY_PROVIDER_ROLE) nonReentrant {
-        uint256 availableLiquidity = IERC20Metadata(_token).balanceOf(address(this));
+    function removeLiquidity(address _borrowToken, uint256 _amount)
+        external
+        onlyRole(LIQUIDITY_PROVIDER_ROLE)
+        nonReentrant
+    {
+        uint256 availableLiquidity = IERC20Metadata(_borrowToken).balanceOf(address(this));
 
-        require(s_isBorrowTokenSupported[_token], LendingCore__UnsupportedToken(_token));
-        require(_token != address(0), LendingCore__InvalidAddress());
-        require(_amount > 0, LendingCore__ZeroAmountNotAllowed());
-        require(availableLiquidity >= _amount, LendingCore__InsufficientBalance(_token, availableLiquidity));
+        require(s_isBorrowTokenSupported[_borrowToken], LendingCore__UnsupportedToken(_borrowToken));
+        require(_borrowToken != address(0), LendingCore__InvalidAddress());
+        require(_amount != 0, LendingCore__ParamZeroNotAllowed());
+        require(availableLiquidity >= _amount, LendingCore__InsufficientBalance(_borrowToken, availableLiquidity));
 
-        IERC20Metadata(_token).safeTransfer(msg.sender, _amount);
-        emit SupplyRemoved(_token, msg.sender, _amount);
+        IERC20Metadata(_borrowToken).safeTransfer(msg.sender, _amount);
+        emit SupplyRemoved(_borrowToken, msg.sender, _amount);
     }
 
     function withdrawLiquidatedCollateral(address _collateralToken, uint256 _amount)
@@ -378,7 +393,7 @@ contract LendingCoreV1 is
             LendingCore__UnsupportedToken(_collateralToken)
         );
         require(_collateralToken != address(0), LendingCore__InvalidAddress());
-        require(_amount > 0, LendingCore__ZeroAmountNotAllowed());
+        require(_amount != 0, LendingCore__ParamZeroNotAllowed());
         require(availableAmount >= _amount, LendingCore__InsufficientBalance(_collateralToken, availableAmount));
 
         IERC20Metadata(_collateralToken).safeTransfer(msg.sender, _amount);
@@ -387,24 +402,35 @@ contract LendingCoreV1 is
     // ========== PARAMETER_MANAGER_ROLE FUNCTIONS ==========
     /**
      * @notice set collateral token LTV
-     * @param _token the address of collateral token
+     * @param _collateralToken the address of collateral token
      * @param _ltvBps the LTV Ratio in Basis Points
      */
-    function setLTV(address _token, uint16 _ltvBps) external onlyRole(PARAMETER_MANAGER_ROLE) {
-        require(_token != address(0), LendingCore__InvalidAddress());
-        require(_ltvBps > 0, LendingCore__ZeroAmountNotAllowed());
+    function setLTV(address _collateralToken, uint16 _ltvBps) external onlyRole(PARAMETER_MANAGER_ROLE) {
+        require(_collateralToken != address(0), LendingCore__InvalidAddress());
+        require(_ltvBps != 0, LendingCore__ParamZeroNotAllowed());
         require(_ltvBps <= BPS_DENOMINATOR, LendingCore__AmountExceedsLimit(BPS_DENOMINATOR, _ltvBps));
 
-        s_ltvBPS[_token] = _ltvBps;
+        if (_ltvBps != s_ltvBPS[_collateralToken]) {
+            s_ltvBPS[_collateralToken] = _ltvBps;
+        }
     }
 
     /**
      * @notice set collateral token liquidation penalty
-     * @param _token the address of collateral token
+     * @param _collateralToken the address of collateral token
      * @param _penaltyBps the penalty amount in Basis Points
      */
-    function setLiquidationPenalty(address _token, uint16 _penaltyBps) external onlyRole(PARAMETER_MANAGER_ROLE) {
-        s_liquidationPenaltyBPS[_token] = _penaltyBps;
+    function setLiquidationPenalty(address _collateralToken, uint16 _penaltyBps)
+        external
+        onlyRole(PARAMETER_MANAGER_ROLE)
+    {
+        require(_collateralToken != address(0), LendingCore__InvalidAddress());
+        require(_penaltyBps != 0, LendingCore__ParamZeroNotAllowed());
+        require(_penaltyBps <= BPS_DENOMINATOR, LendingCore__AmountExceedsLimit(BPS_DENOMINATOR, _penaltyBps));
+
+        if (s_liquidationPenaltyBPS[_collateralToken] != _penaltyBps) {
+            s_liquidationPenaltyBPS[_collateralToken] = _penaltyBps;
+        }
     }
 
     /**
@@ -415,13 +441,15 @@ contract LendingCoreV1 is
     function setMinBorrowAmount(address _borrowToken, uint256 _minAmount) external onlyRole(PARAMETER_MANAGER_ROLE) {
         require(_borrowToken != address(0), LendingCore__InvalidAddress());
         require(s_isBorrowTokenSupported[_borrowToken], LendingCore__UnsupportedToken(_borrowToken));
-        require(_minAmount > 0, LendingCore__ZeroAmountNotAllowed());
+        require(_minAmount != 0, LendingCore__ParamZeroNotAllowed());
         require(
             _minAmount <= s_maxBorrowAmount[_borrowToken],
             LendingCore__AmountExceedsLimit(s_maxBorrowAmount[_borrowToken], _minAmount)
         );
 
-        s_minBorrowAmount[_borrowToken] = _minAmount;
+        if (s_minBorrowAmount[_borrowToken] != _minAmount) {
+            s_minBorrowAmount[_borrowToken] = _minAmount;
+        }
     }
 
     /**
@@ -432,13 +460,15 @@ contract LendingCoreV1 is
     function setMaxBorrowAmount(address _borrowToken, uint256 _maxAmount) external onlyRole(PARAMETER_MANAGER_ROLE) {
         require(_borrowToken != address(0), LendingCore__InvalidAddress());
         require(s_isBorrowTokenSupported[_borrowToken], LendingCore__UnsupportedToken(_borrowToken));
-        require(_maxAmount > 0, LendingCore__ZeroAmountNotAllowed());
+        require(_maxAmount != 0, LendingCore__ParamZeroNotAllowed());
         require(
             _maxAmount >= s_minBorrowAmount[_borrowToken],
             LendingCore__AmountExceedsLimit(s_minBorrowAmount[_borrowToken], _maxAmount)
         );
 
-        s_maxBorrowAmount[_borrowToken] = _maxAmount;
+        if (s_maxBorrowAmount[_borrowToken] != _maxAmount) {
+            s_maxBorrowAmount[_borrowToken] = _maxAmount;
+        }
     }
 
     /**
@@ -446,9 +476,12 @@ contract LendingCoreV1 is
      * @param _duration the duration in seconds
      */
     function setMinBorrowDuration(uint40 _duration) external onlyRole(PARAMETER_MANAGER_ROLE) {
-        require(_duration > 0, LendingCore__ZeroAmountNotAllowed());
+        require(_duration != 0, LendingCore__ParamZeroNotAllowed());
         require(_duration <= s_maxBorrowDuration, LendingCore__DurationExceedsLimit(s_maxBorrowDuration, _duration));
-        s_minBorrowDuration = _duration;
+
+        if (s_minBorrowDuration != _duration) {
+            s_minBorrowDuration = _duration;
+        }
     }
 
     /**
@@ -456,9 +489,12 @@ contract LendingCoreV1 is
      * @param _duration the duration in seconds
      */
     function setMaxBorrowDuration(uint40 _duration) external onlyRole(PARAMETER_MANAGER_ROLE) {
-        require(_duration > 0, LendingCore__ZeroAmountNotAllowed());
+        require(_duration != 0, LendingCore__ParamZeroNotAllowed());
         require(_duration >= s_minBorrowDuration, LendingCore__DurationExceedsLimit(s_minBorrowDuration, _duration));
-        s_maxBorrowDuration = _duration;
+
+        if (s_maxBorrowDuration != _duration) {
+            s_maxBorrowDuration = _duration;
+        }
     }
 
     /**
@@ -466,33 +502,48 @@ contract LendingCoreV1 is
      * @param _period the period duration in seconds
      */
     function setGracePeriod(uint40 _period) external onlyRole(PARAMETER_MANAGER_ROLE) {
-        s_gracePeriod = _period;
+        require(_period != 0, LendingCore__ParamZeroNotAllowed());
+
+        if (s_gracePeriod != _period) {
+            s_gracePeriod = _period;
+        }
     }
 
     // ========== TOKEN_MANAGER_ROLE FUNCTIONS ==========
     /**
      * @notice list new borrow token
-     * @param _token address of borrow token to add
-     * @param _priceFeed address of borrow token pricefeed
+     * @param _borrowToken address of borrow token to add
+     * @param base the base currency of the borrow token
+     * @param quote the quote currency of the borrow token
      */
-    function addBorrowToken(address _token, address _priceFeed) external onlyRole(TOKEN_MANAGER_ROLE) nonReentrant {
-        s_priceOracle.setPriceFeed(_token, _priceFeed);
-        /// @dev use try catch
-        s_borrowTokens.push(_token);
-        s_isBorrowTokenSupported[_token] = true;
+    function addBorrowToken(address _borrowToken, string memory base, string memory quote)
+        external
+        onlyRole(TOKEN_MANAGER_ROLE)
+        nonReentrant
+    {
+        require(_borrowToken != address(0), LendingCore__InvalidAddress());
+        require(bytes(base).length != 0 && bytes(quote).length != 0, LendingCore__ParamZeroNotAllowed());
+        require(!s_isBorrowTokenSupported[_borrowToken], LendingCore__TokenAlreadySupported(_borrowToken));
 
-        emit BorrowTokenAdded(_token, msg.sender);
+        s_priceOracle.setPriceFeed(_borrowToken, base, quote);
+        s_borrowTokens.push(_borrowToken);
+        s_isBorrowTokenSupported[_borrowToken] = true;
+
+        emit BorrowTokenAdded(_borrowToken, msg.sender);
     }
 
     /**
      * @notice remove borrow token from list
-     * @param _token address of borrow token to remove
+     * @param _borrowToken address of borrow token to remove
      * @dev currently does not remove associated oracle
      */
-    function removeBorrowToken(address _token) external onlyRole(TOKEN_MANAGER_ROLE) nonReentrant {
+    function removeBorrowToken(address _borrowToken) external onlyRole(TOKEN_MANAGER_ROLE) nonReentrant {
+        require(_borrowToken != address(0), LendingCore__InvalidAddress());
+        require(s_isBorrowTokenSupported[_borrowToken], LendingCore__UnsupportedToken(_borrowToken));
+
         uint256 length = s_borrowTokens.length;
         for (uint256 i = 0; i < length;) {
-            if (s_borrowTokens[i] == _token) {
+            if (s_borrowTokens[i] == _borrowToken) {
                 s_borrowTokens[i] = s_borrowTokens[length - 1];
                 s_borrowTokens.pop();
 
@@ -504,39 +555,50 @@ contract LendingCoreV1 is
             }
         }
 
-        s_isBorrowTokenSupported[_token] = false;
-        emit BorrowTokenRemoved(_token, msg.sender);
+        delete s_isBorrowTokenSupported[_borrowToken];
+        // delete s_totalDebt[_borrowToken];
+
+        emit BorrowTokenRemoved(_borrowToken, msg.sender);
     }
 
     /**
      * @notice list new collateral token
-     * @param _token address of collateral token to add
-     * @param _priceFeed address of collateral token pricefeed
+     * @param _collateralToken address of collateral token to add
+     * @param base the base currency of the borrow token
+     * @param quote the quote currency of the borrow token
      */
-    function addCollateralToken(address _token, address _priceFeed)
+    function addCollateralToken(address _collateralToken, string memory base, string memory quote)
         external
         onlyRole(TOKEN_MANAGER_ROLE)
         nonReentrant
     {
-        s_collateralManager.addCollateralToken(_token);
-        s_priceOracle.setPriceFeed(_token, _priceFeed);
+        require(_collateralToken != address(0), LendingCore__InvalidAddress());
+        require(bytes(base).length != 0 && bytes(quote).length != 0, LendingCore__ParamZeroNotAllowed());
+        require(
+            !s_collateralManager.s_isCollateralTokenSupported(_collateralToken),
+            LendingCore__TokenAlreadySupported(_collateralToken)
+        );
 
-        emit CollateralTokenAdded(msg.sender, _token);
+        s_collateralManager.addCollateralToken(_collateralToken);
+        s_priceOracle.setPriceFeed(_collateralToken, base, quote);
+
+        emit CollateralTokenAdded(msg.sender, _collateralToken);
     }
 
     /**
      * @notice remove collateral token from list
-     * @param _token address of collateral token to remove
+     * @param _collateralToken address of collateral token to remove
      * @dev currently does not remove associated oracle
      */
-    function removeCollateralToken(address _token) external onlyRole(TOKEN_MANAGER_ROLE) nonReentrant {
-        s_collateralManager.removeCollateralToken(_token);
-        emit CollateralTokenRemoved(_token, msg.sender);
-    }
+    function removeCollateralToken(address _collateralToken) external onlyRole(TOKEN_MANAGER_ROLE) nonReentrant {
+        require(_collateralToken != address(0), LendingCore__InvalidAddress());
+        require(
+            s_collateralManager.s_isCollateralTokenSupported(_collateralToken),
+            LendingCore__UnsupportedToken(_collateralToken)
+        );
 
-    function setMinMaxBorrow(address _borrowToken, uint256 _min, uint256 _max) external onlyRole(TOKEN_MANAGER_ROLE) {
-        s_minBorrowAmount[_borrowToken] = _min;
-        s_maxBorrowAmount[_borrowToken] = _max;
+        s_collateralManager.removeCollateralToken(_collateralToken);
+        emit CollateralTokenRemoved(_collateralToken, msg.sender);
     }
 
     // ========== PAUSER_ROLE FUNCTIONS ==========
@@ -556,6 +618,8 @@ contract LendingCoreV1 is
      */
     function setCollateralManager(address _collateralManager) external onlyRole(UPGRADER_ROLE) {
         require(address(s_collateralManager) == address(0), LendingCore__CollateralManagerAlreadySet());
+        require(_collateralManager != address(0), LendingCore__InvalidAddress());
+
         s_collateralManager = ICollateralManager(_collateralManager);
     }
 
@@ -564,6 +628,7 @@ contract LendingCoreV1 is
      * @param _priceOracle the address of price oracle
      */
     function setPriceOracle(address _priceOracle) external onlyRole(UPGRADER_ROLE) {
+        require(_priceOracle != address(0), LendingCore__InvalidAddress());
         s_priceOracle = IPriceOracle(_priceOracle);
     }
 
@@ -572,6 +637,7 @@ contract LendingCoreV1 is
      * @param _interestRateModel the address of interest rate model
      */
     function setInterestRateModel(address _interestRateModel) external onlyRole(UPGRADER_ROLE) {
+        require(_interestRateModel != address(0), LendingCore__InvalidAddress());
         s_interestRateModel = IInterestRateModel(_interestRateModel);
     }
 
@@ -601,7 +667,7 @@ contract LendingCoreV1 is
     }
 
     function _getHealthFactor(address _user, address _token) internal returns (uint256) {
-        Loan memory loan = s_userLoans[_user][_token];
+        Loan storage loan = s_userLoans[_user][_token];
         uint256 debtValue = loan.principal + loan.interestAccrued - loan.repaidAmount;
         if (debtValue == 0) return type(uint256).max;
 
@@ -620,33 +686,33 @@ contract LendingCoreV1 is
         return s_borrowTokens;
     }
 
-    function getAvailableSupply(address _token) external view returns (uint256) {
-        return IERC20Metadata(_token).balanceOf(address(this));
+    function getAvailableSupply(address _borrowToken) external view returns (uint256) {
+        return IERC20Metadata(_borrowToken).balanceOf(address(this));
     }
 
-    function getTotalSupply(address _token) external view returns (uint256) {
-        return s_totalDebt[_token] + IERC20Metadata(_token).balanceOf(address(this));
+    function getTotalSupply(address _borrowToken) external view returns (uint256) {
+        return s_totalDebt[_borrowToken] + IERC20Metadata(_borrowToken).balanceOf(address(this));
     }
 
-    function getUtilizationBPS(address _token) public view returns (uint256) {
-        uint256 totalBorrow = s_totalDebt[_token];
-        uint256 totalSupply = totalBorrow + IERC20Metadata(_token).balanceOf(address(this));
+    function getUtilizationBPS(address _borrowToken) public view returns (uint256) {
+        uint256 totalBorrow = s_totalDebt[_borrowToken];
+        uint256 totalSupply = totalBorrow + IERC20Metadata(_borrowToken).balanceOf(address(this));
 
         if (totalSupply == 0) return 0;
 
         return Math.mulDiv(totalBorrow, BPS_DENOMINATOR, totalSupply);
     }
 
-    function getUserLoan(address _user, address _token) external view returns (Loan memory) {
-        return s_userLoans[_user][_token];
+    function getUserLoan(address _user, address _collateralToken) external view returns (Loan memory) {
+        return s_userLoans[_user][_collateralToken];
     }
 
-    function getCurrentInterestRateBPS(address _token, uint256 _duration)
+    function getCurrentInterestRateBPS(address _borrowToken, uint256 _duration)
         external
         view
         returns (uint256 interestRateBPS)
     {
-        return s_interestRateModel.getBorrowRateBPS(_duration, getUtilizationBPS(_token));
+        return s_interestRateModel.getBorrowRateBPS(_duration, getUtilizationBPS(_borrowToken));
     }
 
     function getMaxBorrowBeforeInterest(address _user, address _borrowToken, address _collateralToken)

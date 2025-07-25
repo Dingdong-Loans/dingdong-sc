@@ -6,7 +6,6 @@ import {LendingCoreV1} from "../../src/core/LendingCoreV1.sol";
 import {CollateralManager} from "../../src/core/CollateralManager.sol";
 import {InterestRateModel} from "../../src/core/InterestRateModel.sol";
 import {PriceOracle} from "../../src/core/PriceOracle.sol";
-import {TellorUser} from "../../src/tellor/TellorUser.sol";
 import {TellorPlayground} from "@tellor/contracts/TellorPlayground.sol";
 import {MockERC20} from "../mocks/MockERC20.sol";
 import {MockLendingCoreV2} from "../mocks/MockLendingCoreV2.sol";
@@ -62,10 +61,6 @@ contract LendingCoreV1Test is Test {
     MockERC20 public tokenETH;
 
     TellorPlayground public tellorOracle;
-    TellorUser public pricefeedUSDT;
-    TellorUser public pricefeedIDRX;
-    TellorUser public pricefeedBTC;
-    TellorUser public pricefeedETH;
 
     // Roles
     address public admin = makeAddr("ADMIN");
@@ -107,7 +102,8 @@ contract LendingCoreV1Test is Test {
         castCollateralManagerProxy = CollateralManager(address(collateralManagerProxy));
 
         // Initialize supporting contracts
-        priceOracle = new PriceOracle(address(lendingProxy));
+        tellorOracle = new TellorPlayground();
+        priceOracle = new PriceOracle(address(lendingProxy), payable(address(tellorOracle)));
         interestRateModel = new InterestRateModel(address(lendingProxy));
 
         vm.stopPrank();
@@ -132,16 +128,22 @@ contract LendingCoreV1Test is Test {
 
     function _setupPriceFeeds() internal {
         vm.startPrank(oracleHandler);
-        tellorOracle = new TellorPlayground();
-        pricefeedUSDT = new TellorUser(payable(address(tellorOracle)), USDT, USD);
-        pricefeedIDRX = new TellorUser(payable(address(tellorOracle)), IDRX, USD);
-        pricefeedBTC = new TellorUser(payable(address(tellorOracle)), BTC, USD);
-        pricefeedETH = new TellorUser(payable(address(tellorOracle)), ETH, USD);
 
-        tellorOracle.submitValue(QUERY_ID_USDT, abi.encode(PRICE_USDT), 0, QUERY_DATA_USDT);
-        tellorOracle.submitValue(QUERY_ID_IDRX, abi.encode(PRICE_IDRX), 0, QUERY_DATA_IDRX);
-        tellorOracle.submitValue(QUERY_ID_BTC, abi.encode(PRICE_BTC), 0, QUERY_DATA_BTC);
-        tellorOracle.submitValue(QUERY_ID_ETH, abi.encode(PRICE_ETH), 0, QUERY_DATA_ETH);
+        // simulate regularly updated prices
+        uint256 loopCount = 12;
+        uint256 interval = 10 minutes;
+        uint256 startTime = block.timestamp;
+        uint256 blockNum = block.number;
+
+        for (uint256 i = 0; i < loopCount; i++) {
+            vm.warp(startTime + i * interval);
+            vm.roll(blockNum + i); // force a new block
+
+            tellorOracle.submitValue(QUERY_ID_USDT, abi.encode(PRICE_USDT), 0, QUERY_DATA_USDT);
+            tellorOracle.submitValue(QUERY_ID_IDRX, abi.encode(PRICE_IDRX), 0, QUERY_DATA_IDRX);
+            tellorOracle.submitValue(QUERY_ID_BTC, abi.encode(PRICE_BTC), 0, QUERY_DATA_BTC);
+            tellorOracle.submitValue(QUERY_ID_ETH, abi.encode(PRICE_ETH), 0, QUERY_DATA_ETH);
+        }
 
         // Ensure values pass dispute buffer
         vm.warp(block.timestamp + DISPUTE_BUFFER + 1);
@@ -166,15 +168,15 @@ contract LendingCoreV1Test is Test {
         vm.stopPrank();
     }
 
-    function _addBorrowToken(address token, address priceFeed) internal {
+    function _addBorrowToken(address token, string memory base, string memory quote) internal {
         vm.startPrank(tokenManager);
-        castLendingProxy.addBorrowToken(token, priceFeed);
+        castLendingProxy.addBorrowToken(token, base, quote);
         vm.stopPrank();
     }
 
-    function _addCollateralToken(address token, address priceFeed) internal {
+    function _addCollateralToken(address token, string memory base, string memory quote) internal {
         vm.startPrank(tokenManager);
-        castLendingProxy.addCollateralToken(token, priceFeed);
+        castLendingProxy.addCollateralToken(token, base, quote);
         vm.stopPrank();
     }
 
@@ -260,7 +262,7 @@ contract LendingCoreV1Test is Test {
         uint256 depositAmount = userBalance / 2;
 
         _setupTokensAndPriceFeeds();
-        _addCollateralToken(address(tokenBTC), address(pricefeedBTC));
+        _addCollateralToken(address(tokenBTC), BTC, USD);
         _fund(address(tokenBTC), user1, userBalance);
 
         vm.startPrank(user1);
@@ -285,10 +287,10 @@ contract LendingCoreV1Test is Test {
 
     function test_RevertWhen_DepositCollateral_ZeroAmount() public {
         _setupTokensAndPriceFeeds();
-        _addCollateralToken(address(tokenBTC), address(pricefeedBTC));
+        _addCollateralToken(address(tokenBTC), BTC, USD);
 
         vm.startPrank(user1);
-        vm.expectRevert(LendingCoreV1.LendingCore__ZeroAmountNotAllowed.selector);
+        vm.expectRevert(LendingCoreV1.LendingCore__ParamZeroNotAllowed.selector);
         castLendingProxy.depositCollateral(address(tokenBTC), 0);
         vm.stopPrank();
     }
@@ -311,7 +313,7 @@ contract LendingCoreV1Test is Test {
         uint256 withdrawAmount = depositAmount / 2;
 
         _setupTokensAndPriceFeeds();
-        _addCollateralToken(address(tokenBTC), address(pricefeedBTC));
+        _addCollateralToken(address(tokenBTC), BTC, USD);
         _fund(address(tokenBTC), user1, userBalance);
         _approveAndDepositCollateral(user1, address(tokenBTC), depositAmount);
 
@@ -329,7 +331,7 @@ contract LendingCoreV1Test is Test {
 
     function test_RevertWhen_WithdrawCollateral_AmountExceedsDeposit() public {
         _setupTokensAndPriceFeeds();
-        _addCollateralToken(address(tokenBTC), address(pricefeedBTC));
+        _addCollateralToken(address(tokenBTC), BTC, USD);
         _fund(address(tokenBTC), user1, 1e18);
         _approveAndDepositCollateral(user1, address(tokenBTC), 0.5 ether);
 
@@ -354,8 +356,8 @@ contract LendingCoreV1Test is Test {
         uint256 maxBorrowAmount = fundLiquidity;
 
         _setupTokensAndPriceFeeds();
-        _addBorrowToken(address(tokenUSDT), address(pricefeedUSDT));
-        _addCollateralToken(address(tokenBTC), address(pricefeedBTC));
+        _addBorrowToken(address(tokenUSDT), USDT, USD);
+        _addCollateralToken(address(tokenBTC), BTC, USD);
         _setLTV(address(tokenBTC), ltv);
         _setMaxBorrowAmount(address(tokenUSDT), maxBorrowAmount);
         _setMinBorrowAmount(address(tokenUSDT), minBorrowAmount);
@@ -384,8 +386,8 @@ contract LendingCoreV1Test is Test {
 
     function test_RevertWhen_Borrow_ExceedsMaxBorrowAfterInterest() public {
         _setupTokensAndPriceFeeds();
-        _addBorrowToken(address(tokenUSDT), address(pricefeedUSDT));
-        _addCollateralToken(address(tokenBTC), address(pricefeedBTC));
+        _addBorrowToken(address(tokenUSDT), USDT, USD);
+        _addCollateralToken(address(tokenBTC), BTC, USD);
         _setLTV(address(tokenBTC), 5000);
         _setMaxBorrowDuration(30 days);
         _fund(address(tokenBTC), user1, 1e18);
@@ -415,8 +417,8 @@ contract LendingCoreV1Test is Test {
         uint256 maxBorrowAmount = fundLiquidity;
 
         _setupTokensAndPriceFeeds();
-        _addBorrowToken(address(tokenUSDT), address(pricefeedUSDT));
-        _addCollateralToken(address(tokenBTC), address(pricefeedBTC));
+        _addBorrowToken(address(tokenUSDT), USDT, USD);
+        _addCollateralToken(address(tokenBTC), BTC, USD);
         _setLTV(address(tokenBTC), ltv);
         _setMaxBorrowAmount(address(tokenUSDT), maxBorrowAmount);
         _setMinBorrowAmount(address(tokenUSDT), minBorrowAmount);
@@ -456,8 +458,8 @@ contract LendingCoreV1Test is Test {
         uint16 liquidationPenalty = 500;
 
         _setupTokensAndPriceFeeds();
-        _addCollateralToken(address(tokenBTC), address(pricefeedBTC));
-        _addBorrowToken(address(tokenUSDT), address(pricefeedUSDT));
+        _addBorrowToken(address(tokenUSDT), USDT, USD);
+        _addCollateralToken(address(tokenBTC), BTC, USD);
         _setLTV(address(tokenBTC), ltv);
         _setMaxBorrowDuration(730 days);
         _setMinBorrowDuration(1 days);
@@ -534,7 +536,7 @@ contract LendingCoreV1Test is Test {
         uint256 addAmount = fundLiquidity / 2;
 
         _setupTokensAndPriceFeeds();
-        _addBorrowToken(address(tokenUSDT), address(pricefeedUSDT));
+        _addBorrowToken(address(tokenUSDT), USDT, USD);
         _fund(address(tokenUSDT), liquidityProvider, fundLiquidity);
         _addLiquidity(address(tokenUSDT), addAmount);
 
@@ -544,7 +546,7 @@ contract LendingCoreV1Test is Test {
     function test_RemoveLiquidity_Full() public {
         uint256 fundLiquidity = 1_000_000e18;
         _setupTokensAndPriceFeeds();
-        _addBorrowToken(address(tokenUSDT), address(pricefeedUSDT));
+        _addBorrowToken(address(tokenUSDT), USDT, USD);
         _fund(address(tokenUSDT), liquidityProvider, fundLiquidity);
         _addLiquidity(address(tokenUSDT), fundLiquidity);
 
@@ -559,7 +561,7 @@ contract LendingCoreV1Test is Test {
     // ========== Token Management Tests ==========
     function test_AddBorrowToken() public {
         _setupTokensAndPriceFeeds();
-        _addBorrowToken(address(tokenUSDT), address(pricefeedUSDT));
+        _addBorrowToken(address(tokenUSDT), USDT, USD);
 
         assertTrue(castLendingProxy.s_isBorrowTokenSupported(address(tokenUSDT)));
         assertEq(castLendingProxy.s_borrowTokens(0), address(tokenUSDT));
@@ -569,7 +571,7 @@ contract LendingCoreV1Test is Test {
     function test_SetLTV() public {
         uint16 ltvRatio = 5000; // 50%
         _setupTokensAndPriceFeeds();
-        _addCollateralToken(address(tokenBTC), address(pricefeedBTC));
+        _addCollateralToken(address(tokenBTC), BTC, USD);
         _setLTV(address(tokenBTC), ltvRatio);
 
         assertEq(castLendingProxy.s_ltvBPS(address(tokenBTC)), ltvRatio);
@@ -578,7 +580,7 @@ contract LendingCoreV1Test is Test {
     // ========== Pause Tests ==========
     function test_PauseUnpause() public {
         _setupTokensAndPriceFeeds();
-        _addCollateralToken(address(tokenBTC), address(pricefeedBTC));
+        _addCollateralToken(address(tokenBTC), BTC, USD);
         _fund(address(tokenBTC), user1, 1e18);
 
         vm.startPrank(pauser);
@@ -610,7 +612,7 @@ contract LendingCoreV1Test is Test {
     function test_GetAvailableSupply() public {
         uint256 fundLiquidity = 1000e18;
         _setupTokensAndPriceFeeds();
-        _addBorrowToken(address(tokenUSDT), address(pricefeedUSDT));
+        _addBorrowToken(address(tokenUSDT), USDT, USD);
         _fund(address(tokenUSDT), liquidityProvider, fundLiquidity);
         _addLiquidity(address(tokenUSDT), fundLiquidity);
 
